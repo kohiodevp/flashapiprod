@@ -147,7 +147,7 @@ COPY api.py /app/api.py
 # ------------------------------------------------------------------
 WORKDIR /app
 
-EXPOSE 80 10000
+EXPOSE 10000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost/health || exit 1
