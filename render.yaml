@@ -1,17 +1,15 @@
 # render.yaml pour déploiement FLASH API PROD - Plan Gratuit
+
 services:
   # Service principal FLASH API PROD
   - type: web
     name: flash-api-prod
     env: docker
-    docker:
-      dockerfile: Dockerfile
-      context: .
-    
-    # Configuration des ports
-    port: 80
-    
-    # Variables d'environnement
+    region: frankfurt # optional (defaults to oregon)
+    plan: free # optional (defaults to starter)
+    branch: main # optional (defaults to master)
+    numInstances: 1
+    healthCheckPath: /healthz
     envVars:
       - key: DEBUG
         value: "False"
@@ -42,13 +40,7 @@ services:
       - key: JWT_SECRET
         value: "changeme_jwt_secret_here_prod"  # À changer en prod
     
-    # Plan gratuit - limitations
-    plan: free
-    numInstances: 1
-    
-    # Health check adapté
-    healthCheckPath: /health
-    initialDelaySec: 120  # Plus long pour le free tier
+   
     
     # Pas de volumes persistants en free tier
     # Les données seront perdues au redémarrage
@@ -57,11 +49,8 @@ services:
   - type: web
     name: postgis
     env: docker
-    docker:
-      image: postgis/postgis:15-3.3
+    image: postgis/postgis:15-3.3
     
-    # Non exposé publiquement
-    publiclyAccessible: false
     
     # Variables d'environnement
     envVars:
@@ -82,14 +71,7 @@ services:
   - type: web
     name: redis
     env: docker
-    docker:
-      image: redis:7-alpine
-    
-    # Non exposé publiquement
-    publiclyAccessible: false
-    
-    # Commande de démarrage sans mot de passe pour simplifier
-    command: redis-server --save 60 1 --loglevel warning
+    image: redis:7-alpine
     
     # Plan gratuit
     plan: free
