@@ -49,8 +49,6 @@ services:
   - type: web
     name: postgis
     env: docker
-    image: postgis/postgis:15-3.3
-    
     
     # Variables d'environnement
     envVars:
@@ -71,7 +69,6 @@ services:
   - type: web
     name: redis
     env: docker
-    image: redis:7-alpine
     
     # Plan gratuit
     plan: free
