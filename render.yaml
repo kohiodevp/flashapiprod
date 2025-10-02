@@ -1,0 +1,96 @@
+# render.yaml pour déploiement FLASH API PROD - Plan Gratuit
+services:
+  # Service principal FLASH API PROD
+  - type: web
+    name: flash-api-prod
+    env: docker
+    docker:
+      dockerfile: Dockerfile
+      context: .
+    
+    # Configuration des ports
+    port: 80
+    
+    # Variables d'environnement
+    envVars:
+      - key: DEBUG
+        value: "False"
+      - key: WORKERS
+        value: "2"  # Réduit pour le plan gratuit
+      - key: TIMEOUT
+        value: "120"
+      - key: MAX_REQUESTS
+        value: "500"  # Réduit pour économiser les ressources
+      - key: MAX_REQUESTS_JITTER
+        value: "25"
+      - key: JWT_EXPIRATION_HOURS
+        value: "24"
+      - key: DEFAULT_CRS
+        value: "EPSG:32630"
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: BASE_DIR
+        value: "/data"
+      - key: QGIS_PROJECT_FILE
+        value: "/etc/qgis/projects/project.qgs"
+      - key: QGIS_SERVER_LOG_LEVEL
+        value: "0"
+      - key: ENABLE_PORT_10000
+        value: "True" 
+      - key: SECRET_KEY
+        value: "changeme_secret_key_here_prod"  # À changer en prod
+      - key: JWT_SECRET
+        value: "changeme_jwt_secret_here_prod"  # À changer en prod
+    
+    # Plan gratuit - limitations
+    plan: free
+    numInstances: 1
+    
+    # Health check adapté
+    healthCheckPath: /health
+    initialDelaySec: 120  # Plus long pour le free tier
+    
+    # Pas de volumes persistants en free tier
+    # Les données seront perdues au redémarrage
+
+  # Service PostgreSQL/PostGIS - Version free tier
+  - type: web
+    name: postgis
+    env: docker
+    docker:
+      image: postgis/postgis:15-3.3
+    
+    # Non exposé publiquement
+    publiclyAccessible: false
+    
+    # Variables d'environnement
+    envVars:
+      - key: POSTGRES_DB
+        value: "gis"
+      - key: POSTGRES_USER
+        value: "gisuser"
+      - key: POSTGRES_PASSWORD
+        value: "changeme_postgres_password_free"  # À changer
+      - key: POSTGRES_HOST_AUTH_METHOD
+        value: "md5"
+    
+    # Plan gratuit
+    plan: free
+    numInstances: 1
+
+  # Service Redis - Version free tier
+  - type: web
+    name: redis
+    env: docker
+    docker:
+      image: redis:7-alpine
+    
+    # Non exposé publiquement
+    publiclyAccessible: false
+    
+    # Commande de démarrage sans mot de passe pour simplifier
+    command: redis-server --save 60 1 --loglevel warning
+    
+    # Plan gratuit
+    plan: free
+    numInstances: 1
