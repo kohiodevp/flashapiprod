@@ -930,7 +930,7 @@ def api_docs():
                     "name": "Parcelle Test",
                     "geometry": {
                         "type": "Polygon",
-                        "coordinates": [[[-1.5, 12.5], [-1.5, 12.6], [-1.4, 12.6], [-1.4, 12.5], [-1.5, 12.5]]
+                        "coordinates": [[-1.5, 12.5], [-1.5, 12.6], [-1.4, 12.6], [-1.4, 12.5], [-1.5, 12.5]]
                     },
                     "commune": "Bobo-Dioulasso",
                     "section": "A",
