@@ -11,4 +11,6 @@ services:
     numInstances: 1
     healthCheckPath: /healthz
     envVars:
+      - key: ENABLE_PORT_10000
+        value: "True"
       
