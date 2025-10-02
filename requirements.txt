@@ -16,3 +16,4 @@ psycopg2-binary==2.9.9
 aiofiles==23.2.1
 python-multipart==0.0.6
 dicttoxml==1.7.16
+reportlab==4.0.7
