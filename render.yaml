@@ -1,43 +1,20 @@
-# render.yaml – stack QGIS-light + Flask – EPSG:32630
-# Ce fichier va créer :
-#   1 Web Service (build via Dockerfile.render)
-#   1 PostgreSQL database
-#   1 Redis instance
-# Tous les noms sont modifiables à volonté.
-
 services:
-  # ================================================================
-  # 1. WEB SERVICE – API Flask + QGIS Server minimal
-  # ================================================================
   - type: web
-    name: qgis-api
-    env: docker                          # dossier de build
-    plan: free                              # gratuit – changez si besoin
+    name: flashapiprod
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
     numInstances: 1
-    healthCheckPath: /api/health
     envVars:
       - key: PORT
         value: "10000"
-      - key: DEFAULT_CRS
-        value: "EPSG:32630"
-      - key: QGIS_PROJECT_FILE
-        value: "/etc/qgis/projects/project.qgs"
-      - key: BASE_DIR
-        value: "/data"
       - key: DATABASE_URL
         fromDatabase:
-          name: qgis-db
-          property: connectionString
-      - key: REDIS_URL
-        fromRedis:
-          name: qgis-cache
+          name: flashapiprod-db
           property: connectionString
 
-  # ================================================================
-  # 2. BASE DE DONNÉES POSTGRESQL
-  # ================================================================
 databases:
-  - name: qgis-db
-    databaseName: qgis_render
-    user: qgis_user
-    plan: free
+  - name: flashapiprod-db
+    databaseName: flashapiprod
+    user: flashapiprod
+    plan: starter
