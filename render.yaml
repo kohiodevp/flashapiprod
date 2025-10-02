@@ -1,13 +1,53 @@
-# render.yaml pour déploiement FLASH API PROD - Plan Gratuit
+# render.yaml – stack QGIS-light + Flask – EPSG:32630
+# Ce fichier va créer :
+#   1 Web Service (build via Dockerfile.render)
+#   1 PostgreSQL database
+#   1 Redis instance
+# Tous les noms sont modifiables à volonté.
+
 services:
-  # Service principal FLASH API PROD
+  # ================================================================
+  # 1. WEB SERVICE – API Flask + QGIS Server minimal
+  # ================================================================
   - type: web
-    name: flash-api-prod
+    name: qgis-api
     env: docker
-    region: frankfurt # optional (defaults to oregon)
-    plan: free # optional (defaults to starter)
-    branch: main # optional (defaults to master)
+    dockerfilePath: ./Dockerfile.render         # chemin relatif à la racine du repo
+    dockerContext: .                            # dossier de build
+    plan: starter                               # gratuit – changez si besoin
     numInstances: 1
-    healthCheckPath: /healthz
+    healthCheckPath: /api/health
     envVars:
-      
+      - key: PORT
+        value: "10000"
+      - key: DEFAULT_CRS
+        value: "EPSG:32630"
+      - key: QGIS_PROJECT_FILE
+        value: "/etc/qgis/projects/project.qgs"
+      - key: BASE_DIR
+        value: "/data"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: qgis-db
+          property: connectionString
+      - key: REDIS_URL
+        fromRedis:
+          name: qgis-cache
+          property: connectionString
+
+  # ================================================================
+  # 2. BASE DE DONNÉES POSTGRESQL
+  # ================================================================
+databases:
+  - name: qgis-db
+    databaseName: qgis_render
+    user: qgis_user
+    plan: starter  # gratuit – « standard » pour 7 $/mo
+
+  # ================================================================
+  # 3. CACHE REDIS
+  # ================================================================
+redis:
+  - name: qgis-cache
+    plan: starter  # gratuit – « standard » pour 7 $/mo
+    maxmemoryPolicy: allkeys-lru

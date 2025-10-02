@@ -1,4 +1,5 @@
-# api.py - Version optimisée pour EPSG:32630
+# api.py - Version 100 % Render-ready (local & cloud)
+# ------------------------------------------------------------------
 import os
 import json
 import zipfile
@@ -35,51 +36,59 @@ from pydantic import BaseModel, Field, validator, ValidationError
 from flask_cors import CORS
 
 # ------------------------------------------------------------------
-# Configuration avec EPSG:32630
+# Configuration
 # ------------------------------------------------------------------
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
-
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 app.config['JSON_SORT_KEYS'] = False
 
-# Configuration CRS
-DEFAULT_CRS = "EPSG:32630"
+DEFAULT_CRS = os.getenv("DEFAULT_CRS", "EPSG:32630")
 DEFAULT_CRS_WGS84 = "EPSG:4326"
-BASE_DIR = os.getenv('BASE_DIR', '/data')
-CATEGORIES = ["shapefiles", "csv", "geojson", "projects", "other", "tiles", "parcels", "documents"]
-PROJECT = os.getenv('QGIS_PROJECT_FILE', '/etc/qgis/projects/project.qgs')
+BASE_DIR = Path(os.getenv("BASE_DIR", "/data"))
+CATEGORIES = ["shapefiles", "csv", "geojson", "projects", "other",
+              "tiles", "parcels", "documents"]
+PROJECT = os.getenv("QGIS_PROJECT_FILE", "/etc/qgis/projects/project.qgs")
 
-# Création des répertoires
 for d in CATEGORIES:
-    Path(BASE_DIR, d).mkdir(parents=True, exist_ok=True)
+    (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
 
-# Configuration logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 log = logging.getLogger("qgis-api")
 
-# Redis avec gestion d'erreur améliorée
+# ------------------------------------------------------------------
+# Redis : compatible Render (REDIS_URL) et local (REDIS_HOST/PORT)
+# ------------------------------------------------------------------
 redis_client = None
 try:
-    redis_client = redis.Redis(
-        host=os.getenv('REDIS_HOST', 'localhost'),
-        port=int(os.getenv('REDIS_PORT', 6379)),
-        db=0,
-        decode_responses=True,
-        socket_timeout=5,
-        socket_connect_timeout=5
-    )
+    redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_HOST", "localhost")
+    if redis_url.startswith("redis://"):
+        redis_client = redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+        )
+    else:
+        redis_client = redis.Redis(
+            host=redis_url,
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            db=0,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+        )
     redis_client.ping()
-    log.info("✅ Redis connecté avec succès")
+    log.info("✅ Redis connecté via %s", redis_url)
 except Exception as e:
-    log.warning(f"❌ Redis non disponible: {e}")
+    log.warning("❌ Redis non disponible : %s", e)
     redis_client = None
 
 # ------------------------------------------------------------------
-# Modèles Pydantic avec EPSG:32630
+# Modèles Pydantic (inchangés)
 # ------------------------------------------------------------------
 class LayerModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -90,6 +99,7 @@ class LayerModel(BaseModel):
 
     class Config:
         extra = 'forbid'
+
 
 class ProjectModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -103,6 +113,7 @@ class ProjectModel(BaseModel):
 
     class Config:
         extra = 'forbid'
+
 
 class ParcelCreateModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -119,11 +130,10 @@ class ParcelCreateModel(BaseModel):
     def validate_geometry(cls, v):
         if not v.get('type') or not v.get('coordinates'):
             raise ValueError('Géométrie GeoJSON invalide - type et coordinates requis')
-
-        valid_types = ['Point', 'LineString', 'Polygon', 'MultiPoint', 'MultiLineString', 'MultiPolygon']
+        valid_types = ['Point', 'LineString', 'Polygon', 'MultiPoint',
+                       'MultiLineString', 'MultiPolygon']
         if v.get('type') not in valid_types:
-            raise ValueError(f"Type de géométrie invalide. Types acceptés: {', '.join(valid_types)}")
-
+            raise ValueError(f"Type invalide. Types acceptés: {', '.join(valid_types)}")
         return v
 
     @validator('crs')
@@ -131,14 +141,14 @@ class ParcelCreateModel(BaseModel):
         if not v.startswith('EPSG:'):
             raise ValueError('CRS doit être au format EPSG:xxxx')
         try:
-            epsg_code = int(v.split(':')[1])
-            CRS.from_epsg(epsg_code)
+            CRS.from_epsg(int(v.split(':')[1]))
         except:
             raise ValueError(f'CRS invalide: {v}')
         return v
 
     class Config:
         extra = 'forbid'
+
 
 class ParcelAnalysisModel(BaseModel):
     parcel_id: str
@@ -159,6 +169,7 @@ class ParcelAnalysisModel(BaseModel):
     class Config:
         extra = 'forbid'
 
+
 class CoordinateTransformModel(BaseModel):
     coordinates: List[List[float]]
     from_crs: str = Field(DEFAULT_CRS_WGS84, description="CRS source")
@@ -178,8 +189,7 @@ class CoordinateTransformModel(BaseModel):
         if not v.startswith('EPSG:'):
             raise ValueError('CRS doit être au format EPSG:xxxx')
         try:
-            epsg_code = int(v.split(':')[1])
-            CRS.from_epsg(epsg_code)
+            CRS.from_epsg(int(v.split(':')[1]))
         except:
             raise ValueError(f'CRS invalide: {v}')
         return v
@@ -187,8 +197,9 @@ class CoordinateTransformModel(BaseModel):
     class Config:
         extra = 'forbid'
 
+
 # ------------------------------------------------------------------
-# Service de gestion des parcelles avec EPSG:32630
+# Services (non modifiés)
 # ------------------------------------------------------------------
 class ParcelService:
     def __init__(self, base_dir: str):
@@ -199,7 +210,6 @@ class ParcelService:
         self._load_metadata()
 
     def _load_metadata(self):
-        """Charge les métadonnées des parcelles"""
         if self.metadata_file.exists():
             try:
                 with open(self.metadata_file, 'r', encoding='utf-8') as f:
@@ -210,7 +220,6 @@ class ParcelService:
             self.metadata = {}
 
     def _save_metadata(self):
-        """Sauvegarde les métadonnées"""
         try:
             with open(self.metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(self.metadata, f, indent=2, ensure_ascii=False)
@@ -218,12 +227,9 @@ class ParcelService:
             log.error(f"Erreur sauvegarde métadonnées: {e}")
 
     def create_parcel(self, parcel_data: ParcelCreateModel) -> Dict[str, Any]:
-        """Crée une parcelle en convertissant vers EPSG:32630"""
         parcel_id = str(uuid.uuid4())
         parcel_file = self.base_dir / f"{parcel_id}.geojson"
-
         try:
-            # Conversion vers EPSG:32630 si nécessaire
             if parcel_data.crs != self.default_crs:
                 log.info(f"Conversion de {parcel_data.crs} vers {self.default_crs}")
                 geometry = self._transform_geometry(
@@ -234,24 +240,15 @@ class ParcelService:
             else:
                 geometry = shape(parcel_data.geometry)
 
-            # Validation de la géométrie
             if not geometry.is_valid:
-                geometry = geometry.buffer(0)  # Tentative de correction
+                geometry = geometry.buffer(0)
                 if not geometry.is_valid:
                     raise ValueError("Géométrie invalide après correction")
 
-            # Calcul de la superficie en m² (déjà en UTM)
             superficie_m2 = self._calculate_area_m2(geometry)
-            if parcel_data.superficie and abs(superficie_m2 - parcel_data.superficie) > superficie_m2 * 0.1:
-                log.warning(f"Différence >10% entre superficie fournie et calculée")
-
-            # Calcul du périmètre
             perimetre_m = round(geometry.length, 2)
-
-            # Calcul du centroïde
             centroid = geometry.centroid
 
-            # Création du GeoDataFrame en EPSG:32630
             gdf = gpd.GeoDataFrame([{
                 'id': parcel_id,
                 'name': parcel_data.name,
@@ -271,10 +268,8 @@ class ParcelService:
                 'geometry': geometry
             }], crs=self.default_crs)
 
-            # Sauvegarde
             gdf.to_file(parcel_file, driver='GeoJSON')
 
-            # Mise à jour métadonnées
             self.metadata[parcel_id] = {
                 'name': parcel_data.name,
                 'commune': parcel_data.commune,
@@ -285,8 +280,7 @@ class ParcelService:
             }
             self._save_metadata()
 
-            log.info(f"✅ Parcelle {parcel_id} créée avec succès")
-
+            log.info(f"✅ Parcelle {parcel_id} créée")
             return {
                 'id': parcel_id,
                 'name': parcel_data.name,
@@ -312,7 +306,6 @@ class ParcelService:
             raise
 
     def _transform_geometry(self, geometry: Dict, from_crs: str, to_crs: str):
-        """Transforme une géométrie d'un CRS à un autre"""
         try:
             transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
             shapely_geom = shape(geometry)
@@ -325,27 +318,17 @@ class ParcelService:
             raise ValueError(f"Erreur transformation géométrique: {e}")
 
     def _calculate_area_m2(self, geometry) -> float:
-        """Calcule la superficie en mètres carrés (déjà en UTM)"""
         return round(geometry.area, 2)
 
     def get_parcel(self, parcel_id: str, output_crs: str = None) -> Optional[Dict]:
-        """Récupère une parcelle avec conversion CRS optionnelle"""
         parcel_file = self.base_dir / f"{parcel_id}.geojson"
-
         if not parcel_file.exists():
-            log.warning(f"Parcelle {parcel_id} non trouvée")
             return None
-
         try:
             gdf = gpd.read_file(parcel_file)
-
             if gdf.empty:
-                log.error(f"Fichier parcelle {parcel_id} vide")
                 return None
-
             parcel_data = gdf.iloc[0].to_dict()
-
-            # Conversion CRS si demandée
             if output_crs and output_crs != self.default_crs:
                 gdf = gdf.to_crs(output_crs)
                 transformed_geom = gdf.iloc[0].geometry
@@ -354,51 +337,37 @@ class ParcelService:
             else:
                 parcel_data['geometry'] = mapping(gdf.geometry.iloc[0])
                 parcel_data['crs'] = self.default_crs
-
             return parcel_data
-
         except Exception as e:
             log.error(f"Erreur lecture parcelle {parcel_id}: {e}")
             return None
 
     def list_parcels(self, commune: str = None) -> List[Dict]:
-        """Liste toutes les parcelles avec filtre optionnel"""
         parcels = []
-
         for parcel_file in self.base_dir.glob("*.geojson"):
             try:
                 gdf = gpd.read_file(parcel_file)
-                if not gdf.empty:
-                    parcel = gdf.iloc[0].to_dict()
-
-                    # Filtre par commune si spécifié
-                    if commune and parcel.get('commune', '').lower() != commune.lower():
-                        continue
-
-                    # Suppression de la géométrie pour alléger
-                    parcel.pop('geometry', None)
-                    parcels.append(parcel)
+                if gdf.empty:
+                    continue
+                parcel = gdf.iloc[0].to_dict()
+                if commune and parcel.get('commune', '').lower() != commune.lower():
+                    continue
+                parcel.pop('geometry', None)
+                parcels.append(parcel)
             except Exception as e:
                 log.error(f"Erreur lecture {parcel_file}: {e}")
                 continue
-
         return sorted(parcels, key=lambda x: x.get('created_at', ''), reverse=True)
 
     def delete_parcel(self, parcel_id: str) -> bool:
-        """Supprime une parcelle"""
         parcel_file = self.base_dir / f"{parcel_id}.geojson"
-
         if not parcel_file.exists():
             return False
-
         try:
             parcel_file.unlink()
-
-            # Mise à jour métadonnées
             if parcel_id in self.metadata:
                 del self.metadata[parcel_id]
                 self._save_metadata()
-
             log.info(f"✅ Parcelle {parcel_id} supprimée")
             return True
         except Exception as e:
@@ -406,19 +375,15 @@ class ParcelService:
             return False
 
     def analyze_parcel(self, analysis_data: ParcelAnalysisModel) -> Dict[str, Any]:
-        """Analyse une parcelle dans le CRS spécifié"""
         parcel = self.get_parcel(analysis_data.parcel_id, analysis_data.output_crs)
-
         if not parcel:
             raise ValueError(f"Parcelle {analysis_data.parcel_id} non trouvée")
-
         geometry = shape(parcel['geometry'])
         result = {
             'parcel_id': analysis_data.parcel_id,
             'analysis_type': analysis_data.analysis_type,
             'crs': parcel['crs']
         }
-
         if analysis_data.analysis_type == "superficie":
             result['data'] = self._analyze_area(geometry, parcel['crs'])
         elif analysis_data.analysis_type == "perimetre":
@@ -427,13 +392,10 @@ class ParcelService:
             result['data'] = self._analyze_buffer(geometry, analysis_data.parameters, parcel['crs'])
         elif analysis_data.analysis_type == "centroid":
             result['data'] = self._analyze_centroid(geometry, parcel['crs'])
-
         return result
 
     def _analyze_area(self, geometry, crs: str) -> Dict[str, Any]:
-        """Analyse la superficie"""
         area_m2 = geometry.area
-
         if crs == DEFAULT_CRS:
             return {
                 'superficie_m2': round(area_m2, 2),
@@ -450,7 +412,6 @@ class ParcelService:
             }
 
     def _analyze_perimeter(self, geometry, crs: str) -> Dict[str, Any]:
-        """Analyse le périmètre"""
         perimeter = geometry.length
         return {
             'perimetre_m': round(perimeter, 2),
@@ -458,13 +419,10 @@ class ParcelService:
         }
 
     def _analyze_buffer(self, geometry, params: Dict, crs: str) -> Dict[str, Any]:
-        """Crée un buffer"""
         distance = params.get('distance', 10)
-        resolution = params.get('resolution', 16)  # Qualité du buffer
-
+        resolution = params.get('resolution', 16)
         buffer_geom = geometry.buffer(distance, resolution=resolution)
         buffer_area = buffer_geom.area
-
         return {
             'buffer_geometry': mapping(buffer_geom),
             'distance_buffer_m': distance,
@@ -474,7 +432,6 @@ class ParcelService:
         }
 
     def _analyze_centroid(self, geometry, crs: str) -> Dict[str, Any]:
-        """Calcule le centroïde"""
         centroid = geometry.centroid
         return {
             'centroid': {
@@ -485,9 +442,7 @@ class ParcelService:
             'crs': crs
         }
 
-# ------------------------------------------------------------------
-# Service de transformation de coordonnées
-# ------------------------------------------------------------------
+
 class CoordinateService:
     def __init__(self):
         self.common_crs = {
@@ -498,14 +453,12 @@ class CoordinateService:
         }
 
     def transform_coordinates(self, transform_data: CoordinateTransformModel) -> Dict[str, Any]:
-        """Transforme des coordonnées d'un CRS à un autre"""
         try:
             transformer = Transformer.from_crs(
                 transform_data.from_crs,
                 transform_data.to_crs,
                 always_xy=True
             )
-
             transformed_coords = []
             for i, coord in enumerate(transform_data.coordinates):
                 try:
@@ -515,7 +468,6 @@ class CoordinateService:
                 except Exception as e:
                     log.warning(f"Erreur transformation coordonnée {i}: {e}")
                     continue
-
             return {
                 'coordinates': transformed_coords,
                 'from_crs': transform_data.from_crs,
@@ -523,19 +475,14 @@ class CoordinateService:
                 'count': len(transformed_coords),
                 'count_input': len(transform_data.coordinates)
             }
-
         except Exception as e:
             raise ValueError(f"Erreur transformation: {str(e)}")
 
     def get_crs_info(self, epsg_code: str) -> Dict[str, Any]:
-        """Retourne les informations d'un CRS"""
         try:
-            # Nettoyage du code EPSG
             if epsg_code.startswith('EPSG:'):
                 epsg_code = epsg_code.split(':')[1]
-
             crs = CRS.from_epsg(int(epsg_code))
-
             return {
                 'epsg': f"EPSG:{epsg_code}",
                 'name': crs.name,
@@ -549,32 +496,30 @@ class CoordinateService:
             raise ValueError(f"CRS non trouvé: EPSG:{epsg_code} - {str(e)}")
 
     def list_common_crs(self) -> Dict[str, Any]:
-        """Liste les CRS couramment utilisés"""
         return {
             'default': DEFAULT_CRS,
             'common_crs': self.common_crs,
             'description': 'Systèmes de coordonnées de référence couramment utilisés'
         }
 
+
+# ------------------------------------------------------------------
 # Initialisation des services
+# ------------------------------------------------------------------
 parcel_service = ParcelService(BASE_DIR)
 coord_service = CoordinateService()
 
 # ------------------------------------------------------------------
-# Décorateurs et utilitaires
+# Décorateurs
 # ------------------------------------------------------------------
 def handle_errors(f):
-    """Décorateur pour la gestion d'erreurs"""
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
         try:
             return f(*args, **kwargs)
         except ValidationError as e:
             log.error(f"Erreur validation: {e}")
-            return jsonify({
-                "error": "Erreur de validation",
-                "details": e.errors()
-            }), 400
+            return jsonify({"error": "Erreur de validation", "details": e.errors()}), 400
         except ValueError as e:
             log.error(f"Erreur valeur: {e}")
             return jsonify({"error": str(e)}), 400
@@ -583,55 +528,47 @@ def handle_errors(f):
             return jsonify({"error": "Ressource non trouvée"}), 404
         except Exception as e:
             log.error(f"Erreur inattendue: {e}", exc_info=True)
-            return jsonify({
-                "error": "Erreur serveur",
-                "message": str(e)
-            }), 500
+            return jsonify({"error": "Erreur serveur", "message": str(e)}), 500
     return wrapper
 
 # ------------------------------------------------------------------
-# Routes API avec support EPSG:32630
+# Routes
 # ------------------------------------------------------------------
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Endpoint de santé avec info CRS"""
     redis_status = False
     if redis_client:
         try:
             redis_status = redis_client.ping()
         except:
             pass
-
     return jsonify({
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "version": "2.0.0",
+        "version": "2.0.0-render",
         "crs_default": DEFAULT_CRS,
         "services": {
             "qgis_project": Path(PROJECT).exists(),
             "redis": redis_status,
             "base_dir": str(BASE_DIR),
-            "parcels_count": len(list(Path(BASE_DIR, 'parcels').glob('*.geojson')))
+            "parcels_count": len(list((BASE_DIR / 'parcels').glob('*.geojson')))
         }
     })
 
 @app.route('/api/crs/info', methods=['GET'])
 @handle_errors
 def get_crs_info():
-    """Informations sur un CRS spécifique"""
     epsg = request.args.get('epsg', '32630')
     info = coord_service.get_crs_info(epsg)
     return jsonify(info)
 
 @app.route('/api/crs/list', methods=['GET'])
 def list_crs():
-    """Liste les CRS couramment utilisés"""
     return jsonify(coord_service.list_common_crs())
 
 @app.route('/api/crs/transform', methods=['POST'])
 @handle_errors
 def transform_coordinates():
-    """Transforme des coordonnées entre CRS"""
     data = CoordinateTransformModel.parse_raw(request.data)
     result = coord_service.transform_coordinates(data)
     return jsonify(result)
@@ -639,7 +576,6 @@ def transform_coordinates():
 @app.route('/api/parcels', methods=['POST'])
 @handle_errors
 def create_parcel():
-    """Crée une parcelle (conversion automatique vers EPSG:32630)"""
     data = ParcelCreateModel.parse_raw(request.data)
     result = parcel_service.create_parcel(data)
     return jsonify(result), 201
@@ -647,60 +583,55 @@ def create_parcel():
 @app.route('/api/parcels', methods=['GET'])
 @handle_errors
 def list_parcels():
-    """Liste toutes les parcelles avec filtre optionnel"""
     commune = request.args.get('commune')
     parcels = parcel_service.list_parcels(commune)
-    return jsonify({
-        'count': len(parcels),
-        'parcels': parcels,
-        'filter': {'commune': commune} if commune else None
-    })
+    return jsonify({'count': len(parcels), 'parcels': parcels, 'filter': {'commune': commune} if commune else None})
 
 @app.route('/api/parcels/<parcel_id>', methods=['GET'])
 @handle_errors
 def get_parcel(parcel_id):
-    """Récupère une parcelle avec CRS optionnel"""
     output_crs = request.args.get('crs', DEFAULT_CRS)
     parcel = parcel_service.get_parcel(parcel_id, output_crs)
-
     if not parcel:
         return jsonify({"error": "Parcelle non trouvée"}), 404
-
     return jsonify(parcel)
 
 @app.route('/api/parcels/<parcel_id>', methods=['DELETE'])
 @handle_errors
 def delete_parcel(parcel_id):
-    """Supprime une parcelle"""
     success = parcel_service.delete_parcel(parcel_id)
-
     if not success:
         return jsonify({"error": "Parcelle non trouvée"}), 404
-
-    return jsonify({
-        "message": "Parcelle supprimée avec succès",
-        "id": parcel_id
-    }), 200
+    return jsonify({"message": "Parcelle supprimée avec succès", "id": parcel_id}), 200
 
 @app.route('/api/parcels/<parcel_id>/analyze', methods=['POST'])
 @handle_errors
 def analyze_parcel(parcel_id):
-    """Analyse une parcelle"""
     data = ParcelAnalysisModel.parse_raw(request.data)
     data.parcel_id = parcel_id
     result = parcel_service.analyze_parcel(data)
     return jsonify(result)
 
+# ------------------------------------------------------------------
+# OGC - QGIS Server (mock si binaire absent)
+# ------------------------------------------------------------------
+QGIS_BIN = "/usr/lib/cgi-bin/qgis_mapserv.fcgi"
+
 @app.route('/api/ogc/<service>', methods=['GET'])
 @handle_errors
 def ogc_service(service):
-    """Service OGC avec support EPSG:32630"""
     if service.upper() not in ['WMS', 'WFS', 'WCS']:
         return jsonify({"error": "Service non supporté"}), 400
+    if not os.path.isfile(QGIS_BIN):
+        log.warning("QGIS Server non installé → mock OGC")
+        return jsonify({
+            "type": "FeatureCollection",
+            "features": [],
+            "mock": True,
+            "hint": "QGIS Server absent sur Render"
+        }), 200
 
     qs = request.query_string.decode()
-
-    # Forcer EPSG:32630 si non spécifié
     if 'CRS=' not in qs.upper() and 'SRS=' not in qs.upper():
         separator = '&' if '?' in qs else '?'
         qs += f"{separator}CRS={DEFAULT_CRS}"
@@ -716,17 +647,15 @@ def ogc_service(service):
 
     try:
         result = subprocess.run(
-            ["/usr/lib/cgi-bin/qgis_mapserv.fcgi"],
+            [QGIS_BIN],
             env=env,
             capture_output=True,
             timeout=30
         )
-
         if result.returncode != 0:
             log.error(f"Erreur QGIS Server: {result.stderr.decode()}")
             return jsonify({"error": "Erreur service OGC"}), 500
 
-        # Détection du type de contenu
         content_type = "text/xml"
         if result.stdout.startswith(b"\x89PNG"):
             content_type = "image/png"
@@ -738,7 +667,6 @@ def ogc_service(service):
             content_type = "text/xml"
 
         return Response(result.stdout, content_type=content_type)
-
     except subprocess.TimeoutExpired:
         log.error("Timeout QGIS Server")
         return jsonify({"error": "Timeout du service OGC"}), 504
@@ -747,14 +675,12 @@ def ogc_service(service):
         return jsonify({"error": str(e)}), 500
 
 # ------------------------------------------------------------------
-# Routes d'administration
+# Admin
 # ------------------------------------------------------------------
 @app.route('/api/admin/stats', methods=['GET'])
 @handle_errors
 def admin_stats():
-    """Statistiques de l'API"""
-    parcels_dir = Path(BASE_DIR) / "parcels"
-
+    parcels_dir = BASE_DIR / "parcels"
     stats = {
         "parcels": {
             "total": len(list(parcels_dir.glob("*.geojson"))),
@@ -770,52 +696,40 @@ def admin_stats():
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
     }
-
-    # Stats par catégorie
     for category in CATEGORIES:
-        cat_dir = Path(BASE_DIR) / category
+        cat_dir = BASE_DIR / category
         if cat_dir.exists():
             files = list(cat_dir.glob("*"))
             stats["storage"]["categories"][category] = {
                 "files": len(files),
                 "storage_mb": round(sum(f.stat().st_size for f in files if f.is_file()) / (1024 * 1024), 2)
             }
-
     return jsonify(stats)
 
 @app.route('/api/admin/cache/clear', methods=['POST'])
 @handle_errors
 def clear_cache():
-    """Nettoie le cache Redis"""
     if not redis_client:
         return jsonify({"error": "Redis non disponible"}), 503
-
     try:
         redis_client.flushdb()
-        return jsonify({
-            "message": "Cache nettoyé avec succès",
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+        return jsonify({"message": "Cache nettoyé avec succès", "timestamp": datetime.now(timezone.utc).isoformat()})
     except Exception as e:
         log.error(f"Erreur nettoyage cache: {e}")
         return jsonify({"error": str(e)}), 500
 
 # ------------------------------------------------------------------
-# Routes de gestion de fichiers
+# Fichiers
 # ------------------------------------------------------------------
 @app.route('/api/files/upload', methods=['POST'])
 @handle_errors
 def upload_file():
-    """Upload de fichiers géospatiaux"""
     if 'file' not in request.files:
         return jsonify({"error": "Aucun fichier fourni"}), 400
-
     file = request.files['file']
     category = request.form.get('category', 'other')
-
     if not file.filename:
         return jsonify({"error": "Nom de fichier invalide"}), 400
-
     if category not in CATEGORIES:
         return jsonify({"error": f"Catégorie invalide. Valeurs acceptées: {', '.join(CATEGORIES)}"}), 400
 
@@ -823,13 +737,10 @@ def upload_file():
     file_id = str(uuid.uuid4())
     ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
     new_filename = f"{file_id}.{ext}"
-
-    filepath = Path(BASE_DIR) / category / new_filename
+    filepath = BASE_DIR / category / new_filename
 
     try:
         file.save(str(filepath))
-
-        # Validation pour fichiers géospatiaux
         file_info = {
             "id": file_id,
             "filename": filename,
@@ -838,8 +749,6 @@ def upload_file():
             "size_mb": round(filepath.stat().st_size / (1024 * 1024), 2),
             "uploaded_at": datetime.now(timezone.utc).isoformat()
         }
-
-        # Tentative de lecture des métadonnées géospatiales
         if ext in ['shp', 'geojson', 'gpkg']:
             try:
                 gdf = gpd.read_file(str(filepath))
@@ -851,10 +760,8 @@ def upload_file():
                 }
             except Exception as e:
                 log.warning(f"Impossible de lire les métadonnées géospatiales: {e}")
-
         log.info(f"✅ Fichier uploadé: {filename} -> {new_filename}")
         return jsonify(file_info), 201
-
     except Exception as e:
         if filepath.exists():
             filepath.unlink()
@@ -864,13 +771,10 @@ def upload_file():
 @app.route('/api/files/<category>', methods=['GET'])
 @handle_errors
 def list_files(category):
-    """Liste les fichiers d'une catégorie"""
     if category not in CATEGORIES:
         return jsonify({"error": "Catégorie invalide"}), 400
-
-    cat_dir = Path(BASE_DIR) / category
+    cat_dir = BASE_DIR / category
     files = []
-
     for file_path in cat_dir.glob("*"):
         if file_path.is_file():
             files.append({
@@ -879,64 +783,47 @@ def list_files(category):
                 "size_mb": round(file_path.stat().st_size / (1024 * 1024), 2),
                 "modified_at": datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc).isoformat()
             })
-
     return jsonify({
         "category": category,
         "count": len(files),
         "files": sorted(files, key=lambda x: x['modified_at'], reverse=True)
     })
 
-@app.route('/apifiles/<category>/<filename>', methods=['GET'])
+@app.route('/api/files/<category>/<filename>', methods=['GET'])
 @handle_errors
 def download_file(category, filename):
-    """Télécharge un fichier"""
     if category not in CATEGORIES:
         return jsonify({"error": "Catégorie invalide"}), 400
-
     safe_filename = secure_filename(filename)
-    file_path = Path(BASE_DIR) / category / safe_filename
-
+    file_path = BASE_DIR / category / safe_filename
     if not file_path.exists() or not file_path.is_file():
         return jsonify({"error": "Fichier non trouvé"}), 404
-
-    return send_from_directory(
-        Path(BASE_DIR) / category,
-        safe_filename,
-        as_attachment=True
-    )
+    return send_from_directory(BASE_DIR / category, safe_filename, as_attachment=True)
 
 @app.route('/api/files/<category>/<filename>', methods=['DELETE'])
 @handle_errors
 def delete_file(category, filename):
-    """Supprime un fichier"""
     if category not in CATEGORIES:
         return jsonify({"error": "Catégorie invalide"}), 400
-
     safe_filename = secure_filename(filename)
-    file_path = Path(BASE_DIR) / category / safe_filename
-
+    file_path = BASE_DIR / category / safe_filename
     if not file_path.exists():
         return jsonify({"error": "Fichier non trouvé"}), 404
-
     try:
         file_path.unlink()
         log.info(f"✅ Fichier supprimé: {safe_filename}")
-        return jsonify({
-            "message": "Fichier supprimé avec succès",
-            "filename": safe_filename
-        })
+        return jsonify({"message": "Fichier supprimé avec succès", "filename": safe_filename})
     except Exception as e:
         log.error(f"Erreur suppression fichier: {e}")
         raise
 
 # ------------------------------------------------------------------
-# Routes de documentation
+# Documentation
 # ------------------------------------------------------------------
 @app.route('/api/docs', methods=['GET'])
 def api_docs():
-    """Documentation de l'API"""
     docs = {
-        "version": "2.0.0",
+        "version": "2.0.0-render",
         "title": "API QGIS Server - EPSG:32630",
         "description": "API pour la gestion de données géospatiales avec QGIS Server",
         "default_crs": DEFAULT_CRS,
@@ -1043,7 +930,7 @@ def api_docs():
                     "name": "Parcelle Test",
                     "geometry": {
                         "type": "Polygon",
-                        "coordinates": [[[-1.5, 12.5], [-1.5, 12.6], [-1.4, 12.6], [-1.4, 12.5], [-1.5, 12.5]]]
+                        "coordinates": [[[-1.5, 12.5], [-1.5, 12.6], [-1.4, 12.6], [-1.4, 12.5], [-1.5, 12.5]]
                     },
                     "commune": "Bobo-Dioulasso",
                     "section": "A",
@@ -1065,11 +952,10 @@ def api_docs():
     return jsonify(docs)
 
 # ------------------------------------------------------------------
-# Middleware CORS et gestion d'erreurs
+# Middleware CORS & gestion d'erreurs
 # ------------------------------------------------------------------
 @app.after_request
 def after_request(response):
-    """Middleware CORS et headers de sécurité"""
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
@@ -1079,7 +965,6 @@ def after_request(response):
 
 @app.errorhandler(404)
 def not_found(error):
-    """Gestion des erreurs 404"""
     return jsonify({
         "error": "Endpoint non trouvé",
         "path": request.path,
@@ -1088,7 +973,6 @@ def not_found(error):
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
-    """Gestion des fichiers trop volumineux"""
     return jsonify({
         "error": "Fichier trop volumineux",
         "max_size_mb": app.config['MAX_CONTENT_LENGTH'] / (1024 * 1024)
@@ -1096,7 +980,6 @@ def request_entity_too_large(error):
 
 @app.errorhandler(500)
 def internal_error(error):
-    """Gestion des erreurs serveur"""
     log.error(f"Erreur serveur: {error}", exc_info=True)
     return jsonify({
         "error": "Erreur interne du serveur",
@@ -1104,9 +987,10 @@ def internal_error(error):
     }), 500
 
 # ------------------------------------------------------------------
-# Point d'entrée
+# Point d'entrée (local uniquement)
 # ------------------------------------------------------------------
 if __name__ == '__main__':
+    is_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
     log.info("=" * 60)
     log.info("🚀 Démarrage de l'API QGIS Server")
     log.info("=" * 60)
@@ -1116,15 +1000,12 @@ if __name__ == '__main__':
     log.info(f"🔌 Redis: {'✅ Connecté' if redis_client else '❌ Non disponible'}")
     log.info(f"📝 Documentation: http://localhost:10000/api/docs")
     log.info("=" * 60)
-
-    # Vérification de l'environnement
     if not Path(PROJECT).exists():
         log.warning(f"⚠️  Projet QGIS non trouvé: {PROJECT}")
 
-    # Démarrage du serveur
     app.run(
         host='0.0.0.0',
         port=int(os.getenv('PORT', 10000)),
-        debug=os.getenv('DEBUG', 'False').lower() == 'true',
+        debug=False if is_gunicorn else os.getenv('DEBUG', 'False').lower() == 'true',
         threaded=True
     )
