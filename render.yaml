@@ -3,7 +3,7 @@ services:
     name: flashapiprod
     env: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     numInstances: 1
     envVars:
       - key: PORT
@@ -17,4 +17,4 @@ databases:
   - name: flashapiprod-db
     databaseName: flashapiprod
     user: flashapiprod
-    plan: starter
+    plan: free
