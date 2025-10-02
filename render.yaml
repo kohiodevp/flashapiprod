@@ -11,10 +11,8 @@ services:
   # ================================================================
   - type: web
     name: qgis-api
-    env: docker
-    dockerfilePath: ./Dockerfile.render         # chemin relatif à la racine du repo
-    dockerContext: .                            # dossier de build
-    plan: starter                               # gratuit – changez si besoin
+    env: docker                          # dossier de build
+    plan: free                              # gratuit – changez si besoin
     numInstances: 1
     healthCheckPath: /api/health
     envVars:
@@ -42,12 +40,4 @@ databases:
   - name: qgis-db
     databaseName: qgis_render
     user: qgis_user
-    plan: starter  # gratuit – « standard » pour 7 $/mo
-
-  # ================================================================
-  # 3. CACHE REDIS
-  # ================================================================
-redis:
-  - name: qgis-cache
-    plan: starter  # gratuit – « standard » pour 7 $/mo
-    maxmemoryPolicy: allkeys-lru
+    plan: free
