@@ -48,10 +48,12 @@ DEFAULT_CRS_WGS84 = "EPSG:4326"
 BASE_DIR = Path(os.getenv("BASE_DIR", "/data"))
 CATEGORIES = ["shapefiles", "csv", "geojson", "projects", "other",
               "tiles", "parcels", "documents"]
-PROJECT = os.getenv("QGIS_PROJECT_FILE", "/etc/qgis/projects/project.qgs")
+DEFAULT_PROJECT = os.getenv("QGIS_PROJECT_FILE", "/etc/qgis/projects/project.qgs")
 
 for d in CATEGORIES:
     (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
+
+PROJECTS_DIR = BASE_DIR / "projects"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -699,6 +701,7 @@ QGIS_BIN = "/usr/lib/cgi-bin/qgis_mapserv.fcgi"
 def ogc_service(service):
     if service.upper() not in ['WMS', 'WFS', 'WCS']:
         return jsonify({"error": "Service non supporté"}), 400
+
     if not os.path.isfile(QGIS_BIN):
         log.warning("QGIS Server non installé → mock OGC")
         return jsonify({
@@ -708,20 +711,38 @@ def ogc_service(service):
             "hint": "QGIS Server absent sur Render"
         }), 200
 
+    # Récupérer les paramètres de la requête
     qs = request.query_string.decode()
     parsed_qs = request.args
-    request_param = parsed_qs.get('REQUEST', '').upper()
 
-    # N'ajouter CRS que pour GetMap
+    # --- Gestion du projet (MAP) ---
+    map_param = parsed_qs.get('MAP')
+    if map_param:
+        # Sécurité : résoudre le chemin et vérifier qu'il est dans PROJECTS_DIR
+        requested_path = (PROJECTS_DIR / map_param).resolve()
+        if not str(requested_path).startswith(str(PROJECTS_DIR.resolve())):
+            return jsonify({"error": "Accès au projet refusé (hors dossier autorisé)"}), 403
+        if not requested_path.exists():
+            return jsonify({"error": f"Projet non trouvé : {map_param}"}), 404
+        project_file = str(requested_path)
+    else:
+        # Utiliser le projet par défaut
+        if not DEFAULT_PROJECT.exists():
+            return jsonify({"error": f"Projet par défaut absent : {DEFAULT_PROJECT}"}), 500
+        project_file = str(DEFAULT_PROJECT)
+
+    # --- Ajouter CRS par défaut uniquement pour GetMap ---
+    request_param = parsed_qs.get('REQUEST', '').upper()
     if request_param == 'GETMAP':
         if 'CRS=' not in qs.upper() and 'SRS=' not in qs.upper():
             separator = '&' if '?' in qs else '?'
             qs += f"{separator}CRS={DEFAULT_CRS}"
 
+    # --- Préparer l'environnement pour QGIS Server ---
     env = os.environ.copy()
     env.update({
         "QUERY_STRING": qs,
-        "QGIS_PROJECT_FILE": PROJECT,
+        "QGIS_PROJECT_FILE": project_file,  # ← Projet dynamique !
         "SERVICE": service.upper(),
         "QT_QPA_PLATFORM": "offscreen",
         "REQUEST_METHOD": "GET"
@@ -738,17 +759,20 @@ def ogc_service(service):
             log.error(f"Erreur QGIS Server: {result.stderr.decode()}")
             return jsonify({"error": "Erreur service OGC"}), 500
 
+        # Détection du type de contenu
         content_type = "text/xml"
-        if result.stdout.startswith(b"\x89PNG"):
+        stdout = result.stdout
+        if stdout.startswith(b"\x89PNG"):
             content_type = "image/png"
-        elif result.stdout.startswith(b"%PDF"):
+        elif stdout.startswith(b"%PDF"):
             content_type = "application/pdf"
-        elif result.stdout.startswith(b"GIF"):
+        elif stdout.startswith(b"GIF89a"):
             content_type = "image/gif"
-        elif b"<ServiceException" in result.stdout:
+        elif b"<ServiceException" in stdout:
             content_type = "text/xml"
 
-        return Response(result.stdout, content_type=content_type)
+        return Response(stdout, content_type=content_type)
+
     except subprocess.TimeoutExpired:
         log.error("Timeout QGIS Server")
         return jsonify({"error": "Timeout du service OGC"}), 504
