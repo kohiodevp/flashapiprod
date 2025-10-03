@@ -48,7 +48,7 @@ DEFAULT_CRS_WGS84 = "EPSG:4326"
 BASE_DIR = Path(os.getenv("BASE_DIR", "/data"))
 CATEGORIES = ["shapefiles", "csv", "geojson", "projects", "other",
               "tiles", "parcels", "documents"]
-DEFAULT_PROJECT = os.getenv("QGIS_PROJECT_FILE", "/etc/qgis/projects/project.qgs")
+PROJECT = os.getenv("QGIS_PROJECT_FILE", "/etc/qgis/projects/project.qgs")
 
 for d in CATEGORIES:
     (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
@@ -726,10 +726,7 @@ def ogc_service(service):
             return jsonify({"error": f"Projet non trouvé : {map_param}"}), 404
         project_file = str(requested_path)
     else:
-        # Utiliser le projet par défaut
-        if not DEFAULT_PROJECT.exists():
-            return jsonify({"error": f"Projet par défaut absent : {DEFAULT_PROJECT}"}), 500
-        project_file = DEFAULT_PROJECT
+        project_file = PROJECT
 
     # --- Ajouter CRS par défaut uniquement pour GetMap ---
     request_param = parsed_qs.get('REQUEST', '').upper()
