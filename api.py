@@ -729,7 +729,7 @@ def ogc_service(service):
         # Utiliser le projet par défaut
         if not DEFAULT_PROJECT.exists():
             return jsonify({"error": f"Projet par défaut absent : {DEFAULT_PROJECT}"}), 500
-        project_file = str(DEFAULT_PROJECT)
+        project_file = DEFAULT_PROJECT
 
     # --- Ajouter CRS par défaut uniquement pour GetMap ---
     request_param = parsed_qs.get('REQUEST', '').upper()
