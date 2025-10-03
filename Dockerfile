@@ -7,13 +7,10 @@ ENV PORT=10000
 ENV BASE_DIR=/data
 ENV DEFAULT_PROJECT=default.qgs
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        gnupg ca-certificates curl && \
-    # 🔑 SEULE clé disponible
-    curl -L https://qgis.org/downloads/qgis-2021.gpg.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/qgis-archive.gpg && \
-    echo "deb https://qgis.org/debian bookworm main" > /etc/apt/sources.list.d/qgis.list && \
-    apt-get update
+# --- Dépôt QGIS ---
+RUN wget -O - https://qgis.org/downloads/qgis-archive-keyring.gpg | gpg --dearmor | tee /etc/apt/keyrings/qgis-archive-keyring.gpg > /dev/null
+RUN echo "deb [signed-by=/etc/apt/keyrings/qgis-archive-keyring.gpg] https://qgis.org/ubuntu jammy main" > /etc/apt/sources.list.d/qgis.list
+
 
 # ---------- 3. Paquets système ----------
 RUN apt-get install -y --no-install-recommends \
