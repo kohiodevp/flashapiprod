@@ -1,14 +1,16 @@
-Flask==3.0.3
-Flask-Cors==5.0.0
-Pydantic==2.9.2
-geopandas==1.0.1
-redis==5.2.0
-gunicorn==23.0.0
-reportlab==4.2.5
-PyJWT==2.9.0
-bcrypt==4.2.0
-shapely==2.0.6
+# ================================================================
+# requirements.txt - Dépendances Python
+# ================================================================
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-Compress==1.14
+gunicorn==21.2.0
+geopandas==0.14.1
+shapely==2.0.2
 pyproj==3.6.1
-fiona==1.9.6
-pandas==2.2.2
-numpy==1.26.4
+fiona==1.9.5
+pandas==2.1.4
+numpy==1.26.2
+pydantic==2.5.3
+redis==5.0.1
+werkzeug==3.0.1

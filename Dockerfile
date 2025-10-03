@@ -1,92 +1,70 @@
-# ---------- 1. Image de base ----------
+# ================================================================
+# Dockerfile - Image optimisée QGIS + Flask
+# ================================================================
 FROM ubuntu:22.04
 
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PORT=10000
-ENV BASE_DIR=/data
-ENV DEFAULT_PROJECT=default.qgs
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    QT_QPA_PLATFORM=offscreen \
+    QGIS_DISABLE_MESSAGE_HOOKS=1 \
+    PORT=10000
 
-# --- Dépendances système ---
+# Installation dépendances système
 RUN apt-get update && apt-get install -y \
     software-properties-common \
     gnupg \
     wget \
-    python3 \
-    python3-pip \
-    python3-dev \
-    git \
-    build-essential \
-    libgdal-dev \
-    libqt5gui5 \
-    libqt5core5a \
-    libqt5printsupport5 \
-    libqt5svg5 \
-    fonts-dejavu-core \
+    curl \
+    && add-apt-repository ppa:ubuntugis/ubuntugis-unstable \
+    && wget -qO - https://qgis.org/downloads/qgis-2022.gpg.key | gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/qgis-archive.gpg --import \
+    && chmod a+r /etc/apt/trusted.gpg.d/qgis-archive.gpg \
+    && echo "deb https://qgis.org/ubuntu-ltr jammy main" > /etc/apt/sources.list.d/qgis.list \
+    && apt-get update \
+    && apt-get install -y \
+        qgis \
+        qgis-server \
+        python3-qgis \
+        python3-pip \
+        python3-dev \
+        gdal-bin \
+        libgdal-dev \
+        libgeos-dev \
+        libproj-dev \
+        libspatialindex-dev \
+        fonts-liberation \
+        fonts-dejavu-core \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Dépôt QGIS ---
-RUN wget -O - https://qgis.org/downloads/qgis-archive-keyring.gpg | gpg --dearmor | tee /etc/apt/keyrings/qgis-archive-keyring.gpg > /dev/null
-RUN echo "deb [signed-by=/etc/apt/keyrings/qgis-archive-keyring.gpg] https://qgis.org/ubuntu jammy main" > /etc/apt/sources.list.d/qgis.list
+# Installation dépendances Python
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
-# --- Installer QGIS ---
-RUN apt-get update || (sleep 10 && apt-get update) \
-    && apt-get install -y \
-    qgis \
-    qgis-server \
-    qgis-plugin-grass \
-    python3-qgis \
-    qgis-providers \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Création structure dossiers
+RUN mkdir -p /opt/render/project/src/data/{shapefiles,csv,geojson,projects,other,tiles,parcels,documents,cache}
 
-# --- Variables d'environnement QGIS ---
-ENV QGIS_PREFIX_PATH="/usr"
-ENV PYTHONPATH=/usr/share/qgis/python
-ENV QT_QPA_PLATFORM=offscreen
-ENV QT_DEBUG_PLUGINS=0
+# Copie application
+WORKDIR /opt/render/project/src
+COPY api.py .
+COPY default.qgs data/projects/default.qgs
 
-# ---------- 4. Répertoires ----------
-RUN mkdir -p /data/projects /data/parcels /app
+# Permissions
+RUN chmod -R 755 /opt/render/project/src && \
+    chmod -R 777 /opt/render/project/src/data
 
-# ---------- 5. Dépendances Python ----------
-COPY requirements.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# Exposition port
+EXPOSE 10000
 
-# ---------- 6. Projet QGIS minimal ----------
-RUN printf '%s\n' \
-'<?xml version="1.0" encoding="UTF-8"?>' \
-'<!DOCTYPE qgis-project>' \
-'<qgis version="3.40.6-Bratislava" projectname="default">' \
-'  <layer-tree-group expanded="1" checked="Qt::Checked">' \
-'    <layer-tree-layer expanded="1" checked="Qt::Checked" id="parcels" name="parcels"/>' \
-'  </layer-tree-group>' \
-'  <projectLayers>' \
-'    <layer type="vector" id="parcels" enabled="1">' \
-'      <source>/data/parcels/all_parcels.geojson</source>' \
-'      <provider>ogr</provider>' \
-'      <crs>' \
-'        <spatialrefsys>' \
-'          <proj4>+proj=utm +zone=30 +datum=WGS84 +units=m +no_defs</proj4>' \
-'          <srsid>3452</srsid>' \
-'          <srid>32630</srid>' \
-'          <authid>EPSG:32630</authid>' \
-'        </spatialrefsys>' \
-'      </crs>' \
-'    </layer>' \
-'  </projectLayers>' \
-'  <properties>' \
-'    <WMSExtent>' \
-'      <value>100000,1300000,400000,1600000</value>' \
-'    </WMSExtent>' \
-'  </properties>' \
-'</qgis>' > /data/projects/default.qgs
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:10000/api/health || exit 1
 
-# ---------- 7. Fichiers applicatifs ----------
-COPY api.py /app/api.py
-COPY init.sh /app/init.sh
-RUN chmod +x /app/init.sh
-WORKDIR /app
-
-# ---------- 8. Lancement ----------
-ENTRYPOINT ["/app/init.sh"]
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--threads", "8", "--timeout", "0", "api:app"]
+# Démarrage avec Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", \
+     "--workers", "4", \
+     "--threads", "2", \
+     "--worker-class", "gthread", \
+     "--timeout", "120", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "api:app"]
