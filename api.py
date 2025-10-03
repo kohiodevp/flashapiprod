@@ -709,9 +709,14 @@ def ogc_service(service):
         }), 200
 
     qs = request.query_string.decode()
-    if 'CRS=' not in qs.upper() and 'SRS=' not in qs.upper():
-        separator = '&' if '?' in qs else '?'
-        qs += f"{separator}CRS={DEFAULT_CRS}"
+    parsed_qs = request.args
+    request_param = parsed_qs.get('REQUEST', '').upper()
+
+    # N'ajouter CRS que pour GetMap
+    if request_param == 'GETMAP':
+        if 'CRS=' not in qs.upper() and 'SRS=' not in qs.upper():
+            separator = '&' if '?' in qs else '?'
+            qs += f"{separator}CRS={DEFAULT_CRS}"
 
     env = os.environ.copy()
     env.update({
