@@ -93,7 +93,7 @@ except Exception as e:
 class LayerModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     source: str
-    geom: str = Field("Polygon", regex="^(Point|LineString|Polygon|MultiPolygon)$")
+    geom: str = Field("Polygon", pattern=r"^(Point|LineString|Polygon|MultiPolygon)$")
     lid: Optional[str] = None
     crs: str = Field(DEFAULT_CRS, description="Système de coordonnées")
 
@@ -103,7 +103,7 @@ class LayerModel(BaseModel):
 
 class ProjectModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    crs_authid: str = Field(DEFAULT_CRS, regex=r"^EPSG:\d+$")
+    crs_authid: str = Field(DEFAULT_CRS, pattern=r"^EPSG:\d+$")
     crs_proj4: str = Field("+proj=utm +zone=30 +datum=WGS84 +units=m +no_defs")
     crs_wkt: str = ""
     srsid: int = Field(3452, gt=0)
@@ -128,12 +128,88 @@ class ParcelCreateModel(BaseModel):
 
     @validator('geometry')
     def validate_geometry(cls, v):
-        if not v.get('type') or not v.get('coordinates'):
-            raise ValueError('Géométrie GeoJSON invalide - type et coordinates requis')
-        valid_types = ['Point', 'LineString', 'Polygon', 'MultiPoint',
-                       'MultiLineString', 'MultiPolygon']
-        if v.get('type') not in valid_types:
-            raise ValueError(f"Type invalide. Types acceptés: {', '.join(valid_types)}")
+        if not isinstance(v, dict):
+            raise ValueError('La géométrie doit être un objet GeoJSON (dictionnaire)')
+        
+        geom_type = v.get('type')
+        coords = v.get('coordinates')
+        
+        if not geom_type or coords is None:
+            raise ValueError('Géométrie GeoJSON invalide : champs "type" et "coordinates" requis')
+        
+        valid_types = ['Point', 'LineString', 'Polygon', 'MultiPoint', 'MultiLineString', 'MultiPolygon']
+        if geom_type not in valid_types:
+            raise ValueError(f'Type de géométrie invalide. Types acceptés : {", ".join(valid_types)}')
+
+        def validate_point(c):
+            if not (isinstance(c, (list, tuple)) and len(c) >= 2):
+                raise ValueError(f'Point invalide : doit être une liste/tuple avec au moins [x, y], reçu : {c}')
+            if not all(isinstance(i, (int, float)) for i in c[:2]):
+                raise ValueError(f'Coordonnées du Point doivent être numériques, reçu : {c[:2]}')
+
+        def validate_line_string(c):
+            if not isinstance(c, (list, tuple)) or len(c) < 2:
+                raise ValueError(f'LineString invalide : doit contenir au moins 2 points, reçu : {c}')
+            for i, pt in enumerate(c):
+                try:
+                    validate_point(pt)
+                except ValueError as e:
+                    raise ValueError(f'Point {i} invalide dans LineString : {e}')
+
+        def validate_polygon(c):
+            if not isinstance(c, (list, tuple)) or len(c) == 0:
+                raise ValueError('Polygon invalide : doit contenir au moins un anneau (extérieur)')
+            for ring_index, ring in enumerate(c):
+                if not isinstance(ring, (list, tuple)) or len(ring) < 4:
+                    raise ValueError(f'Anneau {ring_index} du Polygon invalide : doit avoir ≥4 points (fermé), reçu : {ring}')
+                # Vérifier que le premier et dernier point sont identiques (ou presque)
+                if len(ring) > 0:
+                    first, last = ring[0], ring[-1]
+                    if isinstance(first, (list, tuple)) and isinstance(last, (list, tuple)):
+                        if len(first) >= 2 and len(last) >= 2:
+                            if abs(first[0] - last[0]) > 1e-10 or abs(first[1] - last[1]) > 1e-10:
+                                # On ne bloque pas, mais on pourrait avertir — Shapely le fermera
+                                pass
+                for i, pt in enumerate(ring):
+                    try:
+                        validate_point(pt)
+                    except ValueError as e:
+                        raise ValueError(f'Point {i} de l\'anneau {ring_index} invalide : {e}')
+
+        try:
+            if geom_type == "Point":
+                validate_point(coords)
+            elif geom_type == "LineString":
+                validate_line_string(coords)
+            elif geom_type == "Polygon":
+                validate_polygon(coords)
+            elif geom_type == "MultiPoint":
+                if not isinstance(coords, (list, tuple)):
+                    raise ValueError('MultiPoint invalide : coordinates doit être une liste de points')
+                for i, pt in enumerate(coords):
+                    try:
+                        validate_point(pt)
+                    except ValueError as e:
+                        raise ValueError(f'Point {i} dans MultiPoint invalide : {e}')
+            elif geom_type == "MultiLineString":
+                if not isinstance(coords, (list, tuple)):
+                    raise ValueError('MultiLineString invalide : coordinates doit être une liste de LineStrings')
+                for i, line in enumerate(coords):
+                    try:
+                        validate_line_string(line)
+                    except ValueError as e:
+                        raise ValueError(f'LineString {i} dans MultiLineString invalide : {e}')
+            elif geom_type == "MultiPolygon":
+                if not isinstance(coords, (list, tuple)):
+                    raise ValueError('MultiPolygon invalide : coordinates doit être une liste de Polygons')
+                for i, poly in enumerate(coords):
+                    try:
+                        validate_polygon(poly)
+                    except ValueError as e:
+                        raise ValueError(f'Polygon {i} dans MultiPolygon invalide : {e}')
+        except Exception as e:
+            raise ValueError(f'Erreur de validation de la géométrie {geom_type} : {e}')
+
         return v
 
     @validator('crs')
@@ -152,7 +228,7 @@ class ParcelCreateModel(BaseModel):
 
 class ParcelAnalysisModel(BaseModel):
     parcel_id: str
-    analysis_type: str = Field(..., regex="^(superficie|perimetre|distance|buffer|centroid)$")
+    analysis_type: str = Field(..., pattern="^(superficie|perimetre|distance|buffer|centroid)$")
     parameters: Optional[Dict[str, Any]] = None
     output_crs: str = Field(DEFAULT_CRS, description="CRS pour les résultats")
 
@@ -311,7 +387,8 @@ class ParcelService:
             shapely_geom = shape(geometry)
 
             def transform_coords(x, y, z=None):
-                return transformer.transform(x, y)
+                xt, yt = transformer.transform(x, y)
+                return (xt, yt)
 
             return transform(transform_coords, shapely_geom)
         except Exception as e:
