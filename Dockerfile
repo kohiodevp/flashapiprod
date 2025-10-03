@@ -1,5 +1,5 @@
 # ---------- 1. Image de base ----------
-FROM python:3.11-slim
+FROM ubuntu:22.04
 
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
@@ -7,33 +7,43 @@ ENV PORT=10000
 ENV BASE_DIR=/data
 ENV DEFAULT_PROJECT=default.qgs
 
+# --- Dépendances système ---
+RUN apt-get update && apt-get install -y \
+    software-properties-common \
+    gnupg \
+    wget \
+    python3 \
+    python3-pip \
+    python3-dev \
+    git \
+    build-essential \
+    libgdal-dev \
+    libqt5gui5 \
+    libqt5core5a \
+    libqt5printsupport5 \
+    libqt5svg5 \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 # --- Dépôt QGIS ---
 RUN wget -O - https://qgis.org/downloads/qgis-archive-keyring.gpg | gpg --dearmor | tee /etc/apt/keyrings/qgis-archive-keyring.gpg > /dev/null
 RUN echo "deb [signed-by=/etc/apt/keyrings/qgis-archive-keyring.gpg] https://qgis.org/ubuntu jammy main" > /etc/apt/sources.list.d/qgis.list
 
-
-# ---------- 3. Paquets système ----------
-RUN apt-get install -y --no-install-recommends \
+# --- Installer QGIS ---
+RUN apt-get update || (sleep 10 && apt-get update) \
+    && apt-get install -y \
+    qgis \
     qgis-server \
-    qgis-providers \
+    qgis-plugin-grass \
     python3-qgis \
-    gdal-bin \
-    libgdal-dev \
-    libproj-dev \
-    libgeos-dev \
-    build-essential \
-    # --- Dépendances Qt pour QgsApplication ---
-    libqt5gui5 \
-    libqt5widgets5 \
-    libqt5core5a \
-    libqt5xml5 \
-    libqt5svg5 \
-    libqt5printsupport5 \
-    libqt5network5 \
-    libfontconfig1 \
-    libfreetype6 \
-    fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/*
+    qgis-providers \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# --- Variables d'environnement QGIS ---
+ENV QGIS_PREFIX_PATH="/usr"
+ENV PYTHONPATH=/usr/share/qgis/python
+ENV QT_QPA_PLATFORM=offscreen
+ENV QT_DEBUG_PLUGINS=0
 
 # ---------- 4. Répertoires ----------
 RUN mkdir -p /data/projects /data/parcels /app
