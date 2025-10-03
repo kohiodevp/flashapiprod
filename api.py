@@ -1,4 +1,4 @@
-# api.py - Version 100 % Render-ready (local & cloud)
+# api.py - Version finale avec support QGIS Server + gestion dynamique de projets
 # ------------------------------------------------------------------
 import os
 import json
@@ -10,27 +10,20 @@ import fcntl
 import uuid
 import time
 import functools
-import jwt
-import bcrypt
-import redis
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Tuple
+from threading import Lock, Thread
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from shapely.geometry import Polygon, Point, shape, mapping
+from shapely.geometry import shape, mapping
 from shapely.ops import transform
 from pyproj import Transformer, CRS
 import fiona
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.lib.units import cm
-
-from flask import Flask, request, jsonify, send_from_directory, Response, make_response
+from flask import Flask, request, jsonify, send_from_directory, Response
 from werkzeug.utils import secure_filename
 from pydantic import BaseModel, Field, validator, ValidationError
 from flask_cors import CORS
@@ -46,14 +39,13 @@ app.config['JSON_SORT_KEYS'] = False
 DEFAULT_CRS = os.getenv("DEFAULT_CRS", "EPSG:32630")
 DEFAULT_CRS_WGS84 = "EPSG:4326"
 BASE_DIR = Path(os.getenv("BASE_DIR", "/data"))
-CATEGORIES = ["shapefiles", "csv", "geojson", "projects", "other",
-              "tiles", "parcels", "documents"]
-PROJECT = os.getenv("QGIS_PROJECT_FILE", "/etc/qgis/projects/project.qgs")
+PROJECTS_DIR = BASE_DIR / "projects"
+DEFAULT_PROJECT = PROJECTS_DIR / os.getenv("DEFAULT_PROJECT", "default.qgs")
 
+CATEGORIES = ["shapefiles", "csv", "geojson", "projects", "other", "tiles", "parcels", "documents"]
 for d in CATEGORIES:
     (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
-
-PROJECTS_DIR = BASE_DIR / "projects"
+PROJECTS_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,26 +54,20 @@ logging.basicConfig(
 log = logging.getLogger("qgis-api")
 
 # ------------------------------------------------------------------
-# Redis : compatible Render (REDIS_URL) et local (REDIS_HOST/PORT)
+# Redis
 # ------------------------------------------------------------------
 redis_client = None
 try:
+    import redis
     redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_HOST", "localhost")
     if redis_url.startswith("redis://"):
         redis_client = redis.Redis.from_url(
-            redis_url,
-            decode_responses=True,
-            socket_timeout=5,
-            socket_connect_timeout=5,
+            redis_url, decode_responses=True, socket_timeout=5, socket_connect_timeout=5
         )
     else:
         redis_client = redis.Redis(
-            host=redis_url,
-            port=int(os.getenv("REDIS_PORT", 6379)),
-            db=0,
-            decode_responses=True,
-            socket_timeout=5,
-            socket_connect_timeout=5,
+            host=redis_url, port=int(os.getenv("REDIS_PORT", 6379)), db=0,
+            decode_responses=True, socket_timeout=5, socket_connect_timeout=5
         )
     redis_client.ping()
     log.info("✅ Redis connecté via %s", redis_url)
@@ -90,18 +76,198 @@ except Exception as e:
     redis_client = None
 
 # ------------------------------------------------------------------
-# Modèles Pydantic (inchangés)
+# Gestion QGIS (dynamique)
+# ------------------------------------------------------------------
+project_sessions = {}
+project_sessions_lock = Lock()
+qgis_manager = None
+SESSION_TIMEOUT = timedelta(minutes=30)
+
+class QgisManager:
+    def __init__(self):
+        self._initialized = False
+        self.qgs_app = None
+        self.classes = {}
+        self.init_errors = []
+        self._lock = Lock()
+
+    def initialize(self):
+        with self._lock:
+            if self._initialized:
+                return True, None
+            
+            log.info("=== DÉBUT DE L'INITIALISATION DE QGIS ===")
+            try:
+                self._setup_qgis_environment()
+
+                from qgis.core import (
+                    Qgis, QgsApplication, QgsProject, QgsVectorLayer, QgsRasterLayer,
+                    QgsMapSettings, QgsMapRendererParallelJob, QgsProcessingFeedback,
+                    QgsProcessingContext, QgsRectangle, QgsPalLayerSettings, QgsTextFormat,
+                    QgsVectorLayerSimpleLabeling, QgsPrintLayout, QgsLayoutItemMap,
+                    QgsLayoutItemLegend, QgsLayoutItemLabel, QgsLayoutExporter,
+                    QgsCoordinateReferenceSystem, QgsMapLayer, QgsFeature, QgsGeometry,
+                    QgsPointXY, QgsFields, QgsField, QgsVectorFileWriter, QgsWkbTypes,
+                    QgsLayerTreeModel, QgsFeatureRequest, QgsLayerTreeLayer, QgsLayerTreeGroup,
+                    QgsSingleSymbolRenderer, QgsSymbol, QgsFillSymbol, QgsLineSymbol,
+                    QgsMarkerSymbol, QgsReadWriteContext, QgsLayoutItemPage, QgsUnitTypes,
+                    QgsLayoutItemScaleBar, QgsLayoutItemPicture, QgsLayoutPoint, QgsLayoutSize,
+                    QgsLayoutItemAttributeTable, QgsLayoutFrame, QgsMargins, QgsLayoutTable,
+                    QgsLayoutItemRegistry, QgsLayerTree, QgsCoordinateTransform,
+                    QgsLayoutItemMapGrid, QgsLayoutItemMapOverview, QgsLayoutMeasurement,
+                    QgsRenderContext, QgsSimpleFillSymbolLayer, QgsDropShadowEffect,
+                    QgsLegendRenderer, QgsLegendSettings, QgsLegendStyle, QSize, QRectF,
+                    QgsLayoutItemShape, QgsLayoutItemHtml, QgsLayoutManager, QgsLayoutItem,
+                    QgsMasterLayoutInterface, QgsExpression, QgsLayoutTableColumn,
+                    QgsLinePatternFillSymbolLayer, QgsSimpleLineSymbolLayer, QgsLayoutItemMarker
+                )
+                from PyQt5.QtCore import QVariant, Qt, QSize as QtQSize, QBuffer, QByteArray, QIODevice
+                from PyQt5.QtGui import QColor, QFont, QImage, QPainter, QPixmap, QIcon, QPen, QBrush
+
+                if not QgsApplication.instance():
+                    self.qgs_app = QgsApplication([], False)
+                    self.qgs_app.initQgis()
+                    log.info("Application QGIS initialisée.")
+                else:
+                    self.qgs_app = QgsApplication.instance()
+                    log.info("Instance QGIS existante trouvée.")
+                
+                try:
+                    from qgis import processing
+                    log.info("Module de traitement QGIS importé.")
+                except ImportError:
+                    log.warning("Module de traitement QGIS non disponible.")
+                    processing = None
+
+                self.classes = {
+                    'Qgis': Qgis, 'QgsApplication': QgsApplication, 'QgsProject': QgsProject,
+                    'QgsVectorLayer': QgsVectorLayer, 'QgsRasterLayer': QgsRasterLayer,
+                    'QgsMapSettings': QgsMapSettings, 'QgsMapRendererParallelJob': QgsMapRendererParallelJob,
+                    'QgsProcessingFeedback': QgsProcessingFeedback, 'QgsProcessingContext': QgsProcessingContext,
+                    'QgsRectangle': QgsRectangle, 'QgsPalLayerSettings': QgsPalLayerSettings,
+                    'QgsTextFormat': QgsTextFormat, 'QgsVectorLayerSimpleLabeling': QgsVectorLayerSimpleLabeling,
+                    'QgsPrintLayout': QgsPrintLayout, 'QgsLayoutItemMap': QgsLayoutItemMap,
+                    'QgsLayoutItemLegend': QgsLayoutItemLegend, 'QgsLayoutItemLabel': QgsLayoutItemLabel,
+                    'QgsLayoutExporter': QgsLayoutExporter, 'QgsLayoutItemPicture': QgsLayoutItemPicture,
+                    'QgsLayoutPoint': QgsLayoutPoint, 'QgsLayoutSize': QgsLayoutSize,
+                    'QgsUnitTypes': QgsUnitTypes, 'QgsLayoutItemPage': QgsLayoutItemPage,
+                    'QgsSingleSymbolRenderer': QgsSingleSymbolRenderer, 'QgsFillSymbol': QgsFillSymbol,
+                    'QgsLineSymbol': QgsLineSymbol, 'QgsMarkerSymbol': QgsMarkerSymbol,
+                    'QgsCoordinateReferenceSystem': QgsCoordinateReferenceSystem,
+                    'QgsMapLayer': QgsMapLayer, 'QgsFeature': QgsFeature, 'QgsGeometry': QgsGeometry,
+                    'QgsPointXY': QgsPointXY, 'QgsFields': QgsFields, 'QgsField': QgsField,
+                    'QgsVectorFileWriter': QgsVectorFileWriter, 'QgsWkbTypes': QgsWkbTypes,
+                    'QgsLayerTreeModel': QgsLayerTreeModel, 'QgsFeatureRequest': QgsFeatureRequest,
+                    'QgsLayerTreeLayer': QgsLayerTreeLayer, 'QgsLayerTreeGroup': QgsLayerTreeGroup,
+                    'QgsReadWriteContext': QgsReadWriteContext, 'QSize': QSize, 'QRectF': QRectF,
+                    'QByteArray': QByteArray, 'QPainter': QPainter, 'QImage': QImage,
+                    'QgsLayoutItemAttributeTable': QgsLayoutItemAttributeTable,
+                    'QgsLayoutFrame': QgsLayoutFrame, 'QgsMargins': QgsMargins,
+                    'QgsLayoutItemRegistry': QgsLayoutItemRegistry, 'QgsLayerTree': QgsLayerTree,
+                    'QgsCoordinateTransform': QgsCoordinateTransform,
+                    'QgsLayoutItemMapGrid': QgsLayoutItemMapGrid,
+                    'QgsLayoutItemMapOverview': QgsLayoutItemMapOverview,
+                    'QgsLayoutMeasurement': QgsLayoutMeasurement,
+                    'QgsRenderContext': QgsRenderContext,
+                    'QgsSimpleFillSymbolLayer': QgsSimpleFillSymbolLayer,
+                    'QgsDropShadowEffect': QgsDropShadowEffect,
+                    'QgsLegendRenderer': QgsLegendRenderer,
+                    'QgsLegendSettings': QgsLegendSettings,
+                    'QgsLegendStyle': QgsLegendStyle,
+                    'QgsLayoutItemShape': QgsLayoutItemShape,
+                    'QgsLayoutItemHtml': QgsLayoutItemHtml,
+                    'QgsLayoutManager': QgsLayoutManager,
+                    'QgsLayoutItem': QgsLayoutItem,
+                    'QgsMasterLayoutInterface': QgsMasterLayoutInterface,
+                    'QgsExpression': QgsExpression,
+                    'QgsLayoutTableColumn': QgsLayoutTableColumn,
+                    'QgsLinePatternFillSymbolLayer': QgsLinePatternFillSymbolLayer,
+                    'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer,
+                    'QgsLayoutItemMarker': QgsLayoutItemMarker,
+                    'processing': processing, 'QVariant': QVariant, 'QColor': QColor,
+                    'QFont': QFont, 'Qt': Qt, 'QIcon': QIcon, 'QPen': QPen, 'QBrush': QBrush,
+                    'QBuffer': QBuffer, 'QIODevice': QIODevice, 'QPixmap': QPixmap,
+                    'QtQSize': QtQSize
+                }
+                
+                self._initialized = True
+                log.info("=== QGIS INITIALISÉ AVEC SUCCÈS ===")
+                return True, None
+
+            except Exception as e:
+                error_msg = f"Erreur d'initialisation de QGIS : {e}"
+                self.init_errors.append(error_msg)
+                log.error(error_msg, exc_info=True)
+                return False, error_msg
+
+    def _setup_qgis_environment(self):
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        os.environ['QT_DEBUG_PLUGINS'] = '0'
+        os.environ['QT_QPA_FONTDIR'] = '/usr/share/fonts/truetype'
+        log.info("Environnement QGIS configuré pour le rendu hors écran.")
+
+    def is_initialized(self):
+        return self._initialized
+
+    def get_classes(self):
+        if not self._initialized:
+            raise RuntimeError("QGIS n'est pas initialisé.")
+        return self.classes
+
+class ProjectSession:
+    def __init__(self, session_id=None):
+        self.session_id = session_id or str(uuid.uuid4())
+        self.project = None
+        self.created_at = datetime.now()
+        self.last_accessed = datetime.now()
+    
+    def get_project(self, qgs_project_class):
+        if self.project is None:
+            self.project = qgs_project_class()
+            self.project.setTitle(f"Projet de session - {self.session_id}")
+        self.last_accessed = datetime.now()
+        return self.project
+
+    def is_expired(self):
+        return datetime.now() - self.last_accessed > SESSION_TIMEOUT
+
+def get_qgis_manager() -> QgisManager:
+    global qgis_manager
+    if qgis_manager is None:
+        qgis_manager = QgisManager()
+    return qgis_manager
+
+def get_project_session(session_id: str = None) -> tuple[ProjectSession, str]:
+    with project_sessions_lock:
+        if session_id and session_id in project_sessions:
+            session = project_sessions[session_id]
+        else:
+            new_session_id = session_id or str(uuid.uuid4())
+            session = ProjectSession(new_session_id)
+            project_sessions[new_session_id] = session
+    return session, session.session_id
+
+def cleanup_expired_sessions():
+    while True:
+        time.sleep(60)
+        with project_sessions_lock:
+            expired = [sid for sid, sess in project_sessions.items() if sess.is_expired()]
+            for sid in expired:
+                del project_sessions[sid]
+                log.info(f"🧹 Session expirée nettoyée : {sid}")
+
+# ------------------------------------------------------------------
+# Modèles Pydantic
 # ------------------------------------------------------------------
 class LayerModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     source: str
     geom: str = Field("Polygon", pattern=r"^(Point|LineString|Polygon|MultiPolygon)$")
     lid: Optional[str] = None
-    crs: str = Field(DEFAULT_CRS, description="Système de coordonnées")
+    crs: str = Field(DEFAULT_CRS)
 
     class Config:
         extra = 'forbid'
-
 
 class ProjectModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -116,7 +282,6 @@ class ProjectModel(BaseModel):
     class Config:
         extra = 'forbid'
 
-
 class ParcelCreateModel(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     geometry: Dict[str, Any]
@@ -126,57 +291,40 @@ class ParcelCreateModel(BaseModel):
     superficie: Optional[float] = Field(None, gt=0)
     proprietaire: Optional[str] = None
     usage: Optional[str] = None
-    crs: str = Field(DEFAULT_CRS_WGS84, description="CRS des géométries fournies")
+    crs: str = Field(DEFAULT_CRS_WGS84)
 
     @validator('geometry')
     def validate_geometry(cls, v):
         if not isinstance(v, dict):
-            raise ValueError('La géométrie doit être un objet GeoJSON (dictionnaire)')
-        
+            raise ValueError('La géométrie doit être un objet GeoJSON')
         geom_type = v.get('type')
         coords = v.get('coordinates')
-        
         if not geom_type or coords is None:
-            raise ValueError('Géométrie GeoJSON invalide : champs "type" et "coordinates" requis')
-        
+            raise ValueError('Champs "type" et "coordinates" requis')
         valid_types = ['Point', 'LineString', 'Polygon', 'MultiPoint', 'MultiLineString', 'MultiPolygon']
         if geom_type not in valid_types:
-            raise ValueError(f'Type de géométrie invalide. Types acceptés : {", ".join(valid_types)}')
+            raise ValueError(f'Type invalide. Acceptés: {", ".join(valid_types)}')
 
         def validate_point(c):
             if not (isinstance(c, (list, tuple)) and len(c) >= 2):
-                raise ValueError(f'Point invalide : doit être une liste/tuple avec au moins [x, y], reçu : {c}')
+                raise ValueError(f'Point invalide: {c}')
             if not all(isinstance(i, (int, float)) for i in c[:2]):
-                raise ValueError(f'Coordonnées du Point doivent être numériques, reçu : {c[:2]}')
+                raise ValueError(f'Coordonnées non numériques: {c[:2]}')
 
         def validate_line_string(c):
             if not isinstance(c, (list, tuple)) or len(c) < 2:
-                raise ValueError(f'LineString invalide : doit contenir au moins 2 points, reçu : {c}')
-            for i, pt in enumerate(c):
-                try:
-                    validate_point(pt)
-                except ValueError as e:
-                    raise ValueError(f'Point {i} invalide dans LineString : {e}')
+                raise ValueError('LineString trop courte')
+            for pt in c:
+                validate_point(pt)
 
         def validate_polygon(c):
             if not isinstance(c, (list, tuple)) or len(c) == 0:
-                raise ValueError('Polygon invalide : doit contenir au moins un anneau (extérieur)')
-            for ring_index, ring in enumerate(c):
+                raise ValueError('Polygon vide')
+            for ring in c:
                 if not isinstance(ring, (list, tuple)) or len(ring) < 4:
-                    raise ValueError(f'Anneau {ring_index} du Polygon invalide : doit avoir ≥4 points (fermé), reçu : {ring}')
-                # Vérifier que le premier et dernier point sont identiques (ou presque)
-                if len(ring) > 0:
-                    first, last = ring[0], ring[-1]
-                    if isinstance(first, (list, tuple)) and isinstance(last, (list, tuple)):
-                        if len(first) >= 2 and len(last) >= 2:
-                            if abs(first[0] - last[0]) > 1e-10 or abs(first[1] - last[1]) > 1e-10:
-                                # On ne bloque pas, mais on pourrait avertir — Shapely le fermera
-                                pass
-                for i, pt in enumerate(ring):
-                    try:
-                        validate_point(pt)
-                    except ValueError as e:
-                        raise ValueError(f'Point {i} de l\'anneau {ring_index} invalide : {e}')
+                    raise ValueError('Anneau de Polygon < 4 points')
+                for pt in ring:
+                    validate_point(pt)
 
         try:
             if geom_type == "Point":
@@ -186,32 +334,16 @@ class ParcelCreateModel(BaseModel):
             elif geom_type == "Polygon":
                 validate_polygon(coords)
             elif geom_type == "MultiPoint":
-                if not isinstance(coords, (list, tuple)):
-                    raise ValueError('MultiPoint invalide : coordinates doit être une liste de points')
-                for i, pt in enumerate(coords):
-                    try:
-                        validate_point(pt)
-                    except ValueError as e:
-                        raise ValueError(f'Point {i} dans MultiPoint invalide : {e}')
+                for pt in coords:
+                    validate_point(pt)
             elif geom_type == "MultiLineString":
-                if not isinstance(coords, (list, tuple)):
-                    raise ValueError('MultiLineString invalide : coordinates doit être une liste de LineStrings')
-                for i, line in enumerate(coords):
-                    try:
-                        validate_line_string(line)
-                    except ValueError as e:
-                        raise ValueError(f'LineString {i} dans MultiLineString invalide : {e}')
+                for line in coords:
+                    validate_line_string(line)
             elif geom_type == "MultiPolygon":
-                if not isinstance(coords, (list, tuple)):
-                    raise ValueError('MultiPolygon invalide : coordinates doit être une liste de Polygons')
-                for i, poly in enumerate(coords):
-                    try:
-                        validate_polygon(poly)
-                    except ValueError as e:
-                        raise ValueError(f'Polygon {i} dans MultiPolygon invalide : {e}')
+                for poly in coords:
+                    validate_polygon(poly)
         except Exception as e:
-            raise ValueError(f'Erreur de validation de la géométrie {geom_type} : {e}')
-
+            raise ValueError(f'Géométrie {geom_type} invalide: {e}')
         return v
 
     @validator('crs')
@@ -227,39 +359,37 @@ class ParcelCreateModel(BaseModel):
     class Config:
         extra = 'forbid'
 
-
 class ParcelAnalysisModel(BaseModel):
     parcel_id: str
     analysis_type: str = Field(..., pattern="^(superficie|perimetre|distance|buffer|centroid)$")
     parameters: Optional[Dict[str, Any]] = None
-    output_crs: str = Field(DEFAULT_CRS, description="CRS pour les résultats")
+    output_crs: str = Field(DEFAULT_CRS)
 
     @validator('parameters')
     def validate_parameters(cls, v, values):
         analysis_type = values.get('analysis_type')
         if analysis_type == 'buffer' and v:
             if 'distance' not in v:
-                raise ValueError('Le paramètre "distance" est requis pour l\'analyse buffer')
+                raise ValueError('Paramètre "distance" requis pour buffer')
             if not isinstance(v['distance'], (int, float)) or v['distance'] <= 0:
-                raise ValueError('La distance doit être un nombre positif')
+                raise ValueError('Distance doit être un nombre positif')
         return v
 
     class Config:
         extra = 'forbid'
 
-
 class CoordinateTransformModel(BaseModel):
     coordinates: List[List[float]]
-    from_crs: str = Field(DEFAULT_CRS_WGS84, description="CRS source")
-    to_crs: str = Field(DEFAULT_CRS, description="CRS cible")
+    from_crs: str = Field(DEFAULT_CRS_WGS84)
+    to_crs: str = Field(DEFAULT_CRS)
 
     @validator('coordinates')
     def validate_coordinates(cls, v):
         if not v:
-            raise ValueError('La liste de coordonnées ne peut pas être vide')
+            raise ValueError('Liste de coordonnées vide')
         for coord in v:
             if len(coord) < 2:
-                raise ValueError('Chaque coordonnée doit contenir au moins 2 valeurs (x, y)')
+                raise ValueError('Chaque coordonnée doit avoir ≥2 valeurs')
         return v
 
     @validator('from_crs', 'to_crs')
@@ -275,9 +405,8 @@ class CoordinateTransformModel(BaseModel):
     class Config:
         extra = 'forbid'
 
-
 # ------------------------------------------------------------------
-# Services (non modifiés)
+# Services
 # ------------------------------------------------------------------
 class ParcelService:
     def __init__(self, base_dir: str):
@@ -303,6 +432,48 @@ class ParcelService:
                 json.dump(self.metadata, f, indent=2, ensure_ascii=False)
         except Exception as e:
             log.error(f"Erreur sauvegarde métadonnées: {e}")
+
+    def _aggregate_parcels(self):
+        try:
+            parcel_files = list(self.base_dir.glob("*.geojson"))
+            if not parcel_files:
+                empty_gdf = gpd.GeoDataFrame(
+                    columns=["id", "name", "commune", "section", "numero", "superficie_m2", "geometry"],
+                    crs=self.default_crs
+                )
+                empty_gdf.to_file(self.base_dir / "all_parcels.geojson", driver="GeoJSON")
+                log.info("✅ Fichier all_parcels.geojson vide créé")
+                return
+
+            gdfs = []
+            for f in parcel_files:
+                try:
+                    gdf = gpd.read_file(f)
+                    if not gdf.empty:
+                        gdfs.append(gdf)
+                except Exception as e:
+                    log.warning(f"Impossible de lire {f} pour agrégation: {e}")
+                    continue
+
+            if not gdfs:
+                empty_gdf = gpd.GeoDataFrame(
+                    columns=["id", "name", "commune", "section", "numero", "superficie_m2", "geometry"],
+                    crs=self.default_crs
+                )
+                empty_gdf.to_file(self.base_dir / "all_parcels.geojson", driver="GeoJSON")
+            else:
+                merged = pd.concat(gdfs, ignore_index=True)
+                merged_gdf = gpd.GeoDataFrame(merged, crs=self.default_crs)
+                required_cols = ["id", "name", "commune", "section", "numero", "superficie_m2"]
+                for col in required_cols:
+                    if col not in merged_gdf.columns:
+                        merged_gdf[col] = ""
+                merged_gdf.to_file(self.base_dir / "all_parcels.geojson", driver="GeoJSON")
+
+            log.info(f"✅ Agrégation réussie : {len(gdfs)} parcelles → all_parcels.geojson")
+        except Exception as e:
+            log.error(f"❌ Erreur agrégation: {e}", exc_info=True)
+            raise
 
     def create_parcel(self, parcel_data: ParcelCreateModel) -> Dict[str, Any]:
         parcel_id = str(uuid.uuid4())
@@ -357,6 +528,7 @@ class ParcelService:
                 'file': str(parcel_file.name)
             }
             self._save_metadata()
+            self._aggregate_parcels()
 
             log.info(f"✅ Parcelle {parcel_id} créée")
             return {
@@ -389,8 +561,8 @@ class ParcelService:
             shapely_geom = shape(geometry)
 
             def transform_coords(x, y, z=None):
-                xt, yt = transformer.transform(x, y)
-                return (xt, yt)
+                x_new, y_new = transformer.transform(x, y)
+                return (x_new, y_new)
 
             return transform(transform_coords, shapely_geom)
         except Exception as e:
@@ -447,6 +619,7 @@ class ParcelService:
             if parcel_id in self.metadata:
                 del self.metadata[parcel_id]
                 self._save_metadata()
+            self._aggregate_parcels()
             log.info(f"✅ Parcelle {parcel_id} supprimée")
             return True
         except Exception as e:
@@ -475,20 +648,12 @@ class ParcelService:
 
     def _analyze_area(self, geometry, crs: str) -> Dict[str, Any]:
         area_m2 = geometry.area
-        if crs == DEFAULT_CRS:
-            return {
-                'superficie_m2': round(area_m2, 2),
-                'superficie_ha': round(area_m2 / 10000, 4),
-                'superficie_ares': round(area_m2 / 100, 2),
-                'precision': 'exacte'
-            }
-        else:
-            return {
-                'superficie_m2': round(area_m2, 2),
-                'superficie_ha': round(area_m2 / 10000, 4),
-                'precision': 'approximative',
-                'note': 'Pour une mesure exacte, utilisez EPSG:32630'
-            }
+        return {
+            'superficie_m2': round(area_m2, 2),
+            'superficie_ha': round(area_m2 / 10000, 4),
+            'superficie_ares': round(area_m2 / 100, 2),
+            'precision': 'exacte' if crs == DEFAULT_CRS else 'approximative'
+        }
 
     def _analyze_perimeter(self, geometry, crs: str) -> Dict[str, Any]:
         perimeter = geometry.length
@@ -520,7 +685,6 @@ class ParcelService:
             },
             'crs': crs
         }
-
 
 class CoordinateService:
     def __init__(self):
@@ -578,12 +742,11 @@ class CoordinateService:
         return {
             'default': DEFAULT_CRS,
             'common_crs': self.common_crs,
-            'description': 'Systèmes de coordonnées de référence couramment utilisés'
+            'description': 'Systèmes de coordonnées courants'
         }
 
-
 # ------------------------------------------------------------------
-# Initialisation des services
+# Initialisation
 # ------------------------------------------------------------------
 parcel_service = ParcelService(BASE_DIR)
 coord_service = CoordinateService()
@@ -621,13 +784,15 @@ def health():
             redis_status = redis_client.ping()
         except:
             pass
+    qgis_status = get_qgis_manager().is_initialized()
     return jsonify({
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "version": "2.0.0-render",
+        "version": "2.2.0",
         "crs_default": DEFAULT_CRS,
         "services": {
-            "qgis_project": Path(PROJECT).exists(),
+            "default_project": DEFAULT_PROJECT.exists(),
+            "qgis_dynamic": qgis_status,
             "redis": redis_status,
             "base_dir": str(BASE_DIR),
             "parcels_count": len(list((BASE_DIR / 'parcels').glob('*.geojson')))
@@ -664,7 +829,7 @@ def create_parcel():
 def list_parcels():
     commune = request.args.get('commune')
     parcels = parcel_service.list_parcels(commune)
-    return jsonify({'count': len(parcels), 'parcels': parcels, 'filter': {'commune': commune} if commune else None})
+    return jsonify({'count': len(parcels), 'parcels': parcels})
 
 @app.route('/api/parcels/<parcel_id>', methods=['GET'])
 @handle_errors
@@ -681,7 +846,7 @@ def delete_parcel(parcel_id):
     success = parcel_service.delete_parcel(parcel_id)
     if not success:
         return jsonify({"error": "Parcelle non trouvée"}), 404
-    return jsonify({"message": "Parcelle supprimée avec succès", "id": parcel_id}), 200
+    return jsonify({"message": "Parcelle supprimée", "id": parcel_id}), 200
 
 @app.route('/api/parcels/<parcel_id>/analyze', methods=['POST'])
 @handle_errors
@@ -692,7 +857,7 @@ def analyze_parcel(parcel_id):
     return jsonify(result)
 
 # ------------------------------------------------------------------
-# OGC - QGIS Server (mock si binaire absent)
+# OGC - QGIS Server avec support MAP dynamique
 # ------------------------------------------------------------------
 QGIS_BIN = "/usr/lib/cgi-bin/qgis_mapserv.fcgi"
 
@@ -701,45 +866,41 @@ QGIS_BIN = "/usr/lib/cgi-bin/qgis_mapserv.fcgi"
 def ogc_service(service):
     if service.upper() not in ['WMS', 'WFS', 'WCS']:
         return jsonify({"error": "Service non supporté"}), 400
-
     if not os.path.isfile(QGIS_BIN):
         log.warning("QGIS Server non installé → mock OGC")
         return jsonify({
             "type": "FeatureCollection",
             "features": [],
             "mock": True,
-            "hint": "QGIS Server absent sur Render"
+            "hint": "QGIS Server absent"
         }), 200
 
-    # Récupérer les paramètres de la requête
     qs = request.query_string.decode()
     parsed_qs = request.args
+    request_param = parsed_qs.get('REQUEST', '').upper()
 
-    # --- Gestion du projet (MAP) ---
     map_param = parsed_qs.get('MAP')
     if map_param:
-        # Sécurité : résoudre le chemin et vérifier qu'il est dans PROJECTS_DIR
         requested_path = (PROJECTS_DIR / map_param).resolve()
         if not str(requested_path).startswith(str(PROJECTS_DIR.resolve())):
-            return jsonify({"error": "Accès au projet refusé (hors dossier autorisé)"}), 403
+            return jsonify({"error": "Projet hors dossier autorisé"}), 403
         if not requested_path.exists():
-            return jsonify({"error": f"Projet non trouvé : {map_param}"}), 404
+            return jsonify({"error": f"Projet non trouvé: {map_param}"}), 404
         project_file = str(requested_path)
     else:
-        project_file = PROJECT
+        if not DEFAULT_PROJECT.exists():
+            return jsonify({"error": f"Projet par défaut absent: {DEFAULT_PROJECT}"}), 500
+        project_file = str(DEFAULT_PROJECT)
 
-    # --- Ajouter CRS par défaut uniquement pour GetMap ---
-    request_param = parsed_qs.get('REQUEST', '').upper()
     if request_param == 'GETMAP':
         if 'CRS=' not in qs.upper() and 'SRS=' not in qs.upper():
             separator = '&' if '?' in qs else '?'
             qs += f"{separator}CRS={DEFAULT_CRS}"
 
-    # --- Préparer l'environnement pour QGIS Server ---
     env = os.environ.copy()
     env.update({
         "QUERY_STRING": qs,
-        "QGIS_PROJECT_FILE": project_file,  # ← Projet dynamique !
+        "QGIS_PROJECT_FILE": project_file,
         "SERVICE": service.upper(),
         "QT_QPA_PLATFORM": "offscreen",
         "REQUEST_METHOD": "GET"
@@ -756,7 +917,6 @@ def ogc_service(service):
             log.error(f"Erreur QGIS Server: {result.stderr.decode()}")
             return jsonify({"error": "Erreur service OGC"}), 500
 
-        # Détection du type de contenu
         content_type = "text/xml"
         stdout = result.stdout
         if stdout.startswith(b"\x89PNG"):
@@ -769,13 +929,104 @@ def ogc_service(service):
             content_type = "text/xml"
 
         return Response(stdout, content_type=content_type)
-
     except subprocess.TimeoutExpired:
         log.error("Timeout QGIS Server")
         return jsonify({"error": "Timeout du service OGC"}), 504
     except Exception as e:
         log.error(f"Erreur OGC service: {e}")
         return jsonify({"error": str(e)}), 500
+
+# ------------------------------------------------------------------
+# Rapports PDF dynamiques
+# ------------------------------------------------------------------
+@app.route('/api/reports/parcel/<parcel_id>', methods=['GET'])
+@handle_errors
+def generate_parcel_report(parcel_id):
+    qgis_mgr = get_qgis_manager()
+    if not qgis_mgr.is_initialized():
+        return jsonify({"error": "QGIS non initialisé"}), 500
+    
+    classes = qgis_mgr.get_classes()
+    QgsProject = classes['QgsProject']
+    QgsVectorLayer = classes['QgsVectorLayer']
+    QgsPrintLayout = classes['QgsPrintLayout']
+    QgsLayoutItemMap = classes['QgsLayoutItemMap']
+    QgsLayoutItemLabel = classes['QgsLayoutItemLabel']
+    QgsLayoutExporter = classes['QgsLayoutExporter']
+    QgsRectangle = classes['QgsRectangle']
+    QByteArray = classes['QByteArray']
+    QBuffer = classes['QBuffer']
+    QIODevice = classes['QIODevice']
+    
+    parcel = parcel_service.get_parcel(parcel_id, output_crs=DEFAULT_CRS)
+    if not parcel:
+        return jsonify({"error": "Parcelle non trouvée"}), 404
+    
+    geometry = shape(parcel['geometry'])
+    bounds = geometry.bounds
+
+    project = QgsProject.instance()
+    project.clear()
+    
+    parcels_path = str(BASE_DIR / "parcels" / "all_parcels.geojson")
+    vlayer = QgsVectorLayer(parcels_path, "parcels", "ogr")
+    if not vlayer.isValid():
+        return jsonify({"error": "Couche parcels invalide"}), 500
+    project.addMapLayer(vlayer)
+    
+    layout = QgsPrintLayout(project)
+    layout.initializeDefaults()
+    layout.setName("Rapport Parcelle")
+    
+    map_item = QgsLayoutItemMap(layout)
+    map_item.setRect(20, 20, 180, 180)
+    margin_x = (bounds[2] - bounds[0]) * 0.1
+    margin_y = (bounds[3] - bounds[1]) * 0.1
+    map_extent = QgsRectangle(
+        bounds[0] - margin_x,
+        bounds[1] - margin_y,
+        bounds[2] + margin_x,
+        bounds[3] + margin_y
+    )
+    map_item.setExtent(map_extent)
+    map_item.setLayers([vlayer])
+    layout.addLayoutItem(map_item)
+    map_item.attemptMove(classes['QgsLayoutPoint'](10, 10, classes['QgsUnitTypes'].LayoutMillimeters))
+    map_item.attemptResize(classes['QgsLayoutSize'](190, 190, classes['QgsUnitTypes'].LayoutMillimeters))
+    
+    title = QgsLayoutItemLabel(layout)
+    title.setText(f"Rapport Parcelle - {parcel['name']}")
+    title.setFont(classes['QFont']("Arial", 14, classes['QFont'].Bold))
+    layout.addLayoutItem(title)
+    title.attemptMove(classes['QgsLayoutPoint'](10, 5, classes['QgsUnitTypes'].LayoutMillimeters))
+    title.attemptResize(classes['QgsLayoutSize'](190, 10, classes['QgsUnitTypes'].LayoutMillimeters))
+    
+    info_text = (
+        f"Commune : {parcel['commune']}\n"
+        f"Section : {parcel['section']}\n"
+        f"Numéro : {parcel['numero']}\n"
+        f"Superficie : {parcel['superficie_ha']} ha\n"
+        f"Centroïde : ({parcel['centroid']['x']}, {parcel['centroid']['y']})"
+    )
+    info_label = QgsLayoutItemLabel(layout)
+    info_label.setText(info_text)
+    info_label.setFont(classes['QFont']("Arial", 10))
+    layout.addLayoutItem(info_label)
+    info_label.attemptMove(classes['QgsLayoutPoint'](10, 205, classes['QgsUnitTypes'].LayoutMillimeters))
+    info_label.attemptResize(classes['QgsLayoutSize'](190, 30, classes['QgsUnitTypes'].LayoutMillimeters))
+    
+    exporter = QgsLayoutExporter(layout)
+    pdf_data = QByteArray()
+    pdf_buffer = QBuffer(pdf_data)
+    pdf_buffer.open(QIODevice.WriteOnly)
+    
+    result = exporter.exportToPdf(pdf_buffer, classes['QgsLayoutExporter'].PdfExportSettings())
+    if result != classes['QgsLayoutExporter'].Success:
+        return jsonify({"error": "Échec de l'export PDF"}), 500
+    
+    pdf_bytes = bytes(pdf_data)
+    return Response(pdf_bytes, mimetype='application/pdf', 
+                    headers={"Content-Disposition": f"attachment;filename=parcel_{parcel_id}.pdf"})
 
 # ------------------------------------------------------------------
 # Admin
@@ -789,12 +1040,10 @@ def admin_stats():
             "total": len(list(parcels_dir.glob("*.geojson"))),
             "storage_mb": sum(f.stat().st_size for f in parcels_dir.glob("*.geojson")) / (1024 * 1024)
         },
-        "storage": {
-            "base_dir": str(BASE_DIR),
-            "categories": {}
-        },
+        "storage": {"categories": {}},
         "system": {
-            "qgis_project": Path(PROJECT).exists(),
+            "default_project": DEFAULT_PROJECT.exists(),
+            "qgis_dynamic": get_qgis_manager().is_initialized(),
             "redis": redis_client.ping() if redis_client else False,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
@@ -816,7 +1065,7 @@ def clear_cache():
         return jsonify({"error": "Redis non disponible"}), 503
     try:
         redis_client.flushdb()
-        return jsonify({"message": "Cache nettoyé avec succès", "timestamp": datetime.now(timezone.utc).isoformat()})
+        return jsonify({"message": "Cache nettoyé", "timestamp": datetime.now(timezone.utc).isoformat()})
     except Exception as e:
         log.error(f"Erreur nettoyage cache: {e}")
         return jsonify({"error": str(e)}), 500
@@ -828,13 +1077,13 @@ def clear_cache():
 @handle_errors
 def upload_file():
     if 'file' not in request.files:
-        return jsonify({"error": "Aucun fichier fourni"}), 400
+        return jsonify({"error": "Aucun fichier"}), 400
     file = request.files['file']
     category = request.form.get('category', 'other')
     if not file.filename:
         return jsonify({"error": "Nom de fichier invalide"}), 400
     if category not in CATEGORIES:
-        return jsonify({"error": f"Catégorie invalide. Valeurs acceptées: {', '.join(CATEGORIES)}"}), 400
+        return jsonify({"error": f"Catégorie invalide. Acceptées: {', '.join(CATEGORIES)}"}), 400
 
     filename = secure_filename(file.filename)
     file_id = str(uuid.uuid4())
@@ -862,13 +1111,13 @@ def upload_file():
                     'bounds': gdf.total_bounds.tolist() if not gdf.empty else None
                 }
             except Exception as e:
-                log.warning(f"Impossible de lire les métadonnées géospatiales: {e}")
+                log.warning(f"Métadonnées géospatiales non lues: {e}")
         log.info(f"✅ Fichier uploadé: {filename} -> {new_filename}")
         return jsonify(file_info), 201
     except Exception as e:
         if filepath.exists():
             filepath.unlink()
-        log.error(f"Erreur upload fichier: {e}")
+        log.error(f"Erreur upload: {e}")
         raise
 
 @app.route('/api/files/<category>', methods=['GET'])
@@ -915,7 +1164,7 @@ def delete_file(category, filename):
     try:
         file_path.unlink()
         log.info(f"✅ Fichier supprimé: {safe_filename}")
-        return jsonify({"message": "Fichier supprimé avec succès", "filename": safe_filename})
+        return jsonify({"message": "Fichier supprimé", "filename": safe_filename})
     except Exception as e:
         log.error(f"Erreur suppression fichier: {e}")
         raise
@@ -925,154 +1174,38 @@ def delete_file(category, filename):
 # ------------------------------------------------------------------
 @app.route('/api/docs', methods=['GET'])
 def api_docs():
-    docs = {
-        "version": "2.0.0-render",
+    return jsonify({
+        "version": "2.2.0",
         "title": "API QGIS Server - EPSG:32630",
-        "description": "API pour la gestion de données géospatiales avec QGIS Server",
         "default_crs": DEFAULT_CRS,
         "endpoints": {
-            "health": {
-                "path": "/api/health",
+            "reports": {
+                "path": "/api/reports/parcel/{id}",
                 "method": "GET",
-                "description": "État de santé de l'API"
-            },
-            "crs": {
-                "info": {
-                    "path": "/api/crs/info",
-                    "method": "GET",
-                    "params": {"epsg": "Code EPSG (ex: 32630)"},
-                    "description": "Informations sur un CRS"
-                },
-                "list": {
-                    "path": "/api/crs/list",
-                    "method": "GET",
-                    "description": "Liste des CRS couramment utilisés"
-                },
-                "transform": {
-                    "path": "/api/crs/transform",
-                    "method": "POST",
-                    "description": "Transforme des coordonnées entre CRS"
-                }
-            },
-            "parcels": {
-                "create": {
-                    "path": "/api/parcels",
-                    "method": "POST",
-                    "description": "Crée une nouvelle parcelle"
-                },
-                "list": {
-                    "path": "/api/parcels",
-                    "method": "GET",
-                    "params": {"commune": "Filtre par commune (optionnel)"},
-                    "description": "Liste toutes les parcelles"
-                },
-                "get": {
-                    "path": "/api/parcels/{id}",
-                    "method": "GET",
-                    "params": {"crs": "CRS de sortie (optionnel)"},
-                    "description": "Récupère une parcelle"
-                },
-                "delete": {
-                    "path": "/api/parcels/{id}",
-                    "method": "DELETE",
-                    "description": "Supprime une parcelle"
-                },
-                "analyze": {
-                    "path": "/api/parcels/{id}/analyze",
-                    "method": "POST",
-                    "description": "Analyse une parcelle (superficie, périmètre, buffer, centroid)"
-                }
-            },
-            "files": {
-                "upload": {
-                    "path": "/api/files/upload",
-                    "method": "POST",
-                    "description": "Upload un fichier géospatial"
-                },
-                "list": {
-                    "path": "/api/files/{category}",
-                    "method": "GET",
-                    "description": "Liste les fichiers d'une catégorie"
-                },
-                "download": {
-                    "path": "/api/files/{category}/{filename}",
-                    "method": "GET",
-                    "description": "Télécharge un fichier"
-                },
-                "delete": {
-                    "path": "/api/files/{category}/{filename}",
-                    "method": "DELETE",
-                    "description": "Supprime un fichier"
-                }
+                "description": "Génère un rapport PDF pour une parcelle"
             },
             "ogc": {
                 "path": "/api/ogc/{service}",
                 "method": "GET",
-                "services": ["WMS", "WFS", "WCS"],
-                "description": "Services OGC via QGIS Server"
-            },
-            "admin": {
-                "stats": {
-                    "path": "/api/admin/stats",
-                    "method": "GET",
-                    "description": "Statistiques de l'API"
-                },
-                "cache_clear": {
-                    "path": "/api/admin/cache/clear",
-                    "method": "POST",
-                    "description": "Nettoie le cache Redis"
-                }
-            }
-        },
-        "categories": CATEGORIES,
-        "examples": {
-            "create_parcel": {
-                "method": "POST",
-                "url": "/api/parcels",
-                "body": {
-                    "name": "Parcelle Test",
-                    "geometry": {
-                        "type": "Polygon",
-                        "coordinates": [[-1.5, 12.5], [-1.5, 12.6], [-1.4, 12.6], [-1.4, 12.5], [-1.5, 12.5]]
-                    },
-                    "commune": "Bobo-Dioulasso",
-                    "section": "A",
-                    "numero": "123",
-                    "crs": "EPSG:4326"
-                }
-            },
-            "transform_coords": {
-                "method": "POST",
-                "url": "/api/crs/transform",
-                "body": {
-                    "coordinates": [[-1.5, 12.5], [-1.4, 12.6]],
-                    "from_crs": "EPSG:4326",
-                    "to_crs": "EPSG:32630"
-                }
+                "description": "Services OGC (WMS/WFS/WCS)",
+                "note": "Utilisez ?MAP=nom.qgs pour choisir un projet dans /data/projects/"
             }
         }
-    }
-    return jsonify(docs)
+    })
 
 # ------------------------------------------------------------------
-# Middleware CORS & gestion d'erreurs
+# Middleware
 # ------------------------------------------------------------------
 @app.after_request
 def after_request(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     return response
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({
-        "error": "Endpoint non trouvé",
-        "path": request.path,
-        "documentation": "/api/docs"
-    }), 404
+    return jsonify({"error": "Endpoint non trouvé", "documentation": "/api/docs"}), 404
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
@@ -1081,30 +1214,32 @@ def request_entity_too_large(error):
         "max_size_mb": app.config['MAX_CONTENT_LENGTH'] / (1024 * 1024)
     }), 413
 
-@app.errorhandler(500)
-def internal_error(error):
-    log.error(f"Erreur serveur: {error}", exc_info=True)
-    return jsonify({
-        "error": "Erreur interne du serveur",
-        "message": "Veuillez contacter l'administrateur"
-    }), 500
-
 # ------------------------------------------------------------------
-# Point d'entrée (local uniquement)
+# Point d'entrée
 # ------------------------------------------------------------------
 if __name__ == '__main__':
     is_gunicorn = "gunicorn" in os.environ.get("SERVER_SOFTWARE", "")
+    
+    # Initialisation de QGIS
+    qgis_mgr = get_qgis_manager()
+    success, error = qgis_mgr.initialize()
+    if not success:
+        log.error(f"❌ Échec initialisation QGIS : {error}")
+        sys.exit(1)
+    
+    # Démarrer le nettoyage des sessions
+    cleanup_thread = Thread(target=cleanup_expired_sessions, daemon=True)
+    cleanup_thread.start()
+    
     log.info("=" * 60)
-    log.info("🚀 Démarrage de l'API QGIS Server")
+    log.info("🚀 Démarrage API QGIS Server")
+    log.info(f"📁 Données: {BASE_DIR}")
+    log.info(f"🗺️  Projet par défaut: {DEFAULT_PROJECT}")
+    log.info(f"🔌 Redis: {'✅' if redis_client else '❌'}")
+    log.info(f"🧠 QGIS dynamique: {'✅ Initialisé' if qgis_mgr.is_initialized() else '❌'}")
     log.info("=" * 60)
-    log.info(f"📐 CRS par défaut: {DEFAULT_CRS}")
-    log.info(f"📁 Répertoire données: {BASE_DIR}")
-    log.info(f"🗺️  Projet QGIS: {PROJECT}")
-    log.info(f"🔌 Redis: {'✅ Connecté' if redis_client else '❌ Non disponible'}")
-    log.info(f"📝 Documentation: http://localhost:10000/api/docs")
-    log.info("=" * 60)
-    if not Path(PROJECT).exists():
-        log.warning(f"⚠️  Projet QGIS non trouvé: {PROJECT}")
+    if not DEFAULT_PROJECT.exists():
+        log.warning(f"⚠️  Projet par défaut absent: {DEFAULT_PROJECT}")
 
     app.run(
         host='0.0.0.0',
