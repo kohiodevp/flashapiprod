@@ -10,9 +10,9 @@ ENV DEFAULT_PROJECT=default.qgs
 # ---------- 2. Dépôt QGIS officiel ----------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        wget gnupg ca-certificates && \
-    wget -qO - https://qgis.org/downloads/qgis-2024.gpg.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/qgis-archive.gpg && \
-    echo "deb https://qgis.org/debian bookworm main" | tee /etc/apt/sources.list.d/qgis.list && \
+        wget gnupg ca-certificates curl && \
+    curl -L https://qgis.org/downloads/qgis-2023.gpg.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/qgis-archive.gpg && \
+    echo "deb https://qgis.org/debian bookworm main" > /etc/apt/sources.list.d/qgis.list && \
     apt-get update
 
 # ---------- 3. Paquets système ----------
