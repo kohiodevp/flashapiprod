@@ -9,32 +9,38 @@ ENV DEBIAN_FRONTEND=noninteractive \
     QGIS_DISABLE_MESSAGE_HOOKS=1 \
     PORT=10000
 
-# Installation dépendances système
+# --- Dépendances système ---
 RUN apt-get update && apt-get install -y \
     software-properties-common \
     gnupg \
     wget \
-    curl \
-    && add-apt-repository ppa:ubuntugis/ubuntugis-unstable \
-    && wget -qO - https://qgis.org/downloads/qgis-2022.gpg.key | gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/qgis-archive.gpg --import \
-    && chmod a+r /etc/apt/trusted.gpg.d/qgis-archive.gpg \
-    && echo "deb https://qgis.org/ubuntu-ltr jammy main" > /etc/apt/sources.list.d/qgis.list \
-    && apt-get update \
-    && apt-get install -y \
-        qgis \
-        qgis-server \
-        python3-qgis \
-        python3-pip \
-        python3-dev \
-        gdal-bin \
-        libgdal-dev \
-        libgeos-dev \
-        libproj-dev \
-        libspatialindex-dev \
-        fonts-liberation \
-        fonts-dejavu-core \
-    && apt-get clean \
+    python3 \
+    python3-pip \
+    python3-dev \
+    git \
+    build-essential \
+    libgdal-dev \
+    libqt5gui5 \
+    libqt5core5a \
+    libqt5printsupport5 \
+    libqt5svg5 \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+
+# --- Dépôt QGIS ---
+RUN wget -O - https://qgis.org/downloads/qgis-archive-keyring.gpg | gpg --dearmor | tee /etc/apt/keyrings/qgis-archive-keyring.gpg > /dev/null
+RUN echo "deb [signed-by=/etc/apt/keyrings/qgis-archive-keyring.gpg] https://qgis.org/ubuntu jammy main" > /etc/apt/sources.list.d/qgis.list
+
+# --- Installer QGIS ---
+RUN apt-get update || (sleep 10 && apt-get update) \
+    && apt-get install -y \
+    qgis \
+    qgis-server \
+    qgis-plugin-grass \
+    python3-qgis \
+    qgis-providers \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 
 # Installation dépendances Python
 COPY requirements.txt /tmp/requirements.txt
