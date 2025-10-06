@@ -352,7 +352,7 @@ class ReportFormatModel(BaseModel):
 # --- Modèles Analytics/Performance ---
 class AnalyticsDataModel(BaseModel):
     event_type: str
-    Dict[str, Any]
+    details: Dict[str, Any]  # Correction indentation ici
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class PerformanceMetricsModel(BaseModel):
@@ -364,7 +364,7 @@ class PerformanceMetricsModel(BaseModel):
 class UserBehaviorModel(BaseModel):
     user_id: Optional[str] = None
     action: str
-    details: Dict[str, Any]
+    details: Dict[str, Any]  # Correction indentation ici
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # ================================================================
@@ -407,7 +407,7 @@ class ProjectService:
         log.info(f"✅ Projet créé: {project_id}")
         return project_dict
 
-    def update_project(self, project_id: str, project_ ProjectModel) -> Optional[Dict[str, Any]]:
+    def update_project(self, project_id: str, project_data: ProjectModel) -> Optional[Dict[str, Any]]:
         projects = self.get_projects()
         for i, proj in enumerate(projects):
             if proj['id'] == project_id:
@@ -450,7 +450,7 @@ class AnalyticsService:
                 with open(f, 'w') as file:
                     json.dump([], file)
 
-    def log_event(self, event_ AnalyticsDataModel):
+    def log_event(self, event_data: AnalyticsDataModel):
         events = self._read_events()
         events.append(event_data.dict())
         self._write_events(events)
@@ -515,7 +515,7 @@ class PerformanceService:
             with open(self.metrics_file, 'w') as f:
                 json.dump([], f)
 
-    def log_metric(self, metric_ PerformanceMetricsModel):
+    def log_metric(self, metric_data: PerformanceMetricsModel):
         metrics = self._read_metrics()
         metrics.append(metric_data.dict())
         self._write_metrics(metrics)
@@ -553,7 +553,7 @@ class ParcelService:
                 crs=self.default_crs
             )
             empty_gdf.to_file(self.all_parcels_file, driver="GeoJSON")
-    def create_parcel(self, parcel_ ParcelCreateModel) -> Dict[str, Any]:
+    def create_parcel(self, parcel_data: ParcelCreateModel) -> Dict[str, Any]:
         parcel_id = str(uuid.uuid4())
         try:
             # Transformation géométrie
@@ -1040,7 +1040,7 @@ def bulk_update_parcels():
                  gdf.loc[0, key] = value # Mettre à jour la première ligne
 
         # Recalculer si nécessaire (ex: superficie si la géométrie change)
-        if 'geometry' in update_
+        if 'geometry' in update_data:
             geom_shape = shape(update_data['geometry'])
             if not geom_shape.is_valid:
                 geom_shape = geom_shape.buffer(0)
