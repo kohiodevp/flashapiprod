@@ -352,7 +352,7 @@ class ReportFormatModel(BaseModel):
 # --- Modèles Analytics/Performance ---
 class AnalyticsDataModel(BaseModel):
     event_type: str
-     Dict[str, Any]
+    Dict[str, Any]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class PerformanceMetricsModel(BaseModel):
