@@ -394,7 +394,7 @@ class ProjectService:
                 return proj
         return None
 
-    def create_project(self, project_ ProjectModel) -> Dict[str, Any]:
+    def create_project(self, project_data: ProjectModel) -> Dict[str, Any]:
         project_id = str(uuid.uuid4())
         project_dict = project_data.dict()
         project_dict['id'] = project_id
