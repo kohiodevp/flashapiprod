@@ -286,6 +286,25 @@ class ParcelCreateModel(BaseModel):
         except:
             raise ValueError(f'CRS invalide: {v}')
         return v
+
+class ParcelUpdateModel(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    geometry: Optional[Dict[str, Any]] = None
+    commune: Optional[str] = Field(None, min_length=1)
+    section: Optional[str] = Field(None, min_length=1)
+    numero: Optional[str] = Field(None, min_length=1)
+    superficie: Optional[float] = None
+    proprietaire: Optional[str] = None
+    usage: Optional[str] = None
+    crs: Optional[str] = Field(None, pattern=r'^EPSG:\d+$')
+
+    @validator('geometry')
+    def validate_geometry(cls, v):
+        if v is not None: # Ne valider que si la géométrie est fournie
+            if not isinstance(v, dict) or 'type' not in v or 'coordinates' not in v:
+                raise ValueError('Géométrie GeoJSON invalide')
+        return v
+
 class BoundsModel(BaseModel):
     """Modèle pour requête par emprise géographique"""
     minx: float
@@ -294,6 +313,7 @@ class BoundsModel(BaseModel):
     maxy: float
     crs: str = Field(DEFAULT_CRS_WGS84)
     buffer_m: Optional[float] = Field(None, ge=0, le=10000)
+
 class CoordinateTransformModel(BaseModel):
     coordinates: List[List[float]]
     from_crs: str = Field(DEFAULT_CRS_WGS84)
@@ -328,6 +348,24 @@ class BulkParcelDeleteModel(BaseModel):
 
 class ReportFormatModel(BaseModel):
     format: str = Field("pdf", pattern="^(pdf|png|jpg|jpeg)$") # Exemple de formats supportés
+
+# --- Modèles Analytics/Performance ---
+class AnalyticsDataModel(BaseModel):
+    event_type: str
+    data: Dict[str, Any]
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class PerformanceMetricsModel(BaseModel):
+    metric_name: str
+    value: float
+    unit: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class UserBehaviorModel(BaseModel):
+    user_id: Optional[str] = None
+    action: str
+    details: Dict[str, Any]
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # ================================================================
 # Service Projets (esquisse) ---
@@ -394,6 +432,93 @@ class ProjectService:
 
 # --- Initialisation du service Projets ---
 project_service = ProjectService(PROJECTS_DIR)
+
+# ================================================================
+# Service Analytics
+# ================================================================
+class AnalyticsService:
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self.analytics_file = self.base_dir / "analytics.json"
+        self.events_file = self.base_dir / "analytics_events.json"
+        self.behavior_file = self.base_dir / "user_behavior.json"
+        self._ensure_files()
+
+    def _ensure_files(self):
+        for f in [self.analytics_file, self.events_file, self.behavior_file]:
+            if not f.exists():
+                with open(f, 'w') as file:
+                    json.dump([], file)
+
+    def log_event(self, event_data: AnalyticsDataModel):
+        events = self._read_events()
+        events.append(event_data.dict())
+        self._write_events(events)
+        log.info(f"📊 Événement loggué: {event_data.event_type}")
+
+    def get_summary(self):
+        events = self._read_events()
+        summary = {}
+        for event in events:
+            et = event['event_type']
+            summary[et] = summary.get(et, 0) + 1
+        return summary
+
+    def log_user_behavior(self, behavior_data: UserBehaviorModel):
+        behavior = self._read_behavior()
+        behavior.append(behavior_data.dict())
+        self._write_behavior(behavior)
+        log.info(f"👤 Comportement utilisateur loggué: {behavior_data.action}")
+
+    def _read_events(self) -> List[Dict[str, Any]]:
+        with open(self.events_file, 'r') as f:
+            return json.load(f)
+
+    def _write_events(self, data: List[Dict[str, Any]]):
+        with open(self.events_file, 'w') as f:
+            json.dump(data, f, indent=2, default=str) # default=str pour sérialiser les datetime
+
+    def _read_behavior(self) -> List[Dict[str, Any]]:
+        with open(self.behavior_file, 'r') as f:
+            return json.load(f)
+
+    def _write_behavior(self, data: List[Dict[str, Any]]):
+        with open(self.behavior_file, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+
+# ================================================================
+# Service Performance Metrics
+# ================================================================
+class PerformanceService:
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self.metrics_file = self.base_dir / "performance_metrics.json"
+        self._ensure_file()
+
+    def _ensure_file(self):
+        if not self.metrics_file.exists():
+            with open(self.metrics_file, 'w') as f:
+                json.dump([], f)
+
+    def log_metric(self, metric_data: PerformanceMetricsModel):
+        metrics = self._read_metrics()
+        metrics.append(metric_data.dict())
+        self._write_metrics(metrics)
+        log.info(f"📈 Métrique logguée: {metric_data.metric_name}")
+
+    def get_metrics(self, limit: Optional[int] = 100):
+        metrics = self._read_metrics()
+        # Trier par timestamp descendant et limiter
+        sorted_metrics = sorted(metrics, key=lambda x: x['timestamp'], reverse=True)
+        return sorted_metrics[:limit]
+
+    def _read_metrics(self) -> List[Dict[str, Any]]:
+        with open(self.metrics_file, 'r') as f:
+            return json.load(f)
+
+    def _write_metrics(self, data: List[Dict[str, Any]]):
+        with open(self.metrics_file, 'w') as f:
+            json.dump(data, f, indent=2, default=str) # default=str pour sérialiser les datetime
 
 # ================================================================
 # Service Parcelles optimisé
@@ -463,6 +588,50 @@ class ParcelService:
         except Exception as e:
             log.error(f"❌ Erreur création parcelle: {e}")
             raise
+
+    def update_parcel(self, parcel_id: str, parcel_data: ParcelUpdateModel) -> Optional[Dict[str, Any]]:
+        parcel_file = self.base_dir / f"{parcel_id}.geojson"
+        if not parcel_file.exists():
+            return None
+
+        try:
+            gdf = gpd.read_file(parcel_file)
+            if gdf.empty:
+                return None
+
+            update_dict = parcel_data.dict(exclude_unset=True)
+            # Mettre à jour les propriétés
+            for key, value in update_dict.items():
+                if key in gdf.columns:
+                    gdf.loc[0, key] = value
+
+            # Recalculer si la géométrie change
+            if 'geometry' in update_dict:
+                geom_shape = shape(update_dict['geometry'])
+                if not geom_shape.is_valid:
+                    geom_shape = geom_shape.buffer(0)
+                gdf.loc[0, 'geometry'] = geom_shape
+                gdf.loc[0, 'superficie_m2'] = round(geom_shape.area, 2)
+                gdf.loc[0, 'superficie_ha'] = round(geom_shape.area / 10000, 4)
+                gdf.loc[0, 'perimetre_m'] = round(geom_shape.length, 2)
+                centroid = geom_shape.centroid
+                gdf.loc[0, 'centroid_x'] = round(centroid.x, 2)
+                gdf.loc[0, 'centroid_y'] = round(centroid.y, 2)
+
+            # Réécrire le fichier
+            gdf.to_file(parcel_file, driver='GeoJSON')
+            # Mettre à jour l'agrégat
+            self._update_aggregate()
+            log.info(f"✅ Parcelle mise à jour: {parcel_id}")
+
+            # Retourner les données mises à jour
+            updated_data = gdf.iloc[0].to_dict()
+            updated_data['geometry'] = mapping(gdf.geometry.iloc[0])
+            return updated_data
+        except Exception as e:
+            log.error(f"❌ Erreur mise à jour parcelle: {e}")
+            return None
+
     def _transform_geometry(self, geometry: Dict, from_crs: str, to_crs: str):
         transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
         shapely_geom = shape(geometry)
@@ -502,12 +671,12 @@ class ParcelService:
             bbox = (minx, miny, maxx, maxy)
             gdf = gpd.read_file(self.all_parcels_file, bbox=bbox)
             if gdf.empty:
-                return {'count': 0, 'features': [], 'bbox': list(bbox)}
+                return {'count': 0, 'data': [], 'bbox': list(bbox)}
             # Conversion GeoJSON optimisée
             features = json.loads(gdf.to_json())['features']
             return {
                 'count': len(features),
-                'features': features,
+                'data': features,
                 'bbox': list(bbox),
                 'crs': self.default_crs
             }
@@ -580,6 +749,9 @@ class CoordinateService:
 # ================================================================
 parcel_service = ParcelService(BASE_DIR)
 coord_service = CoordinateService()
+analytics_service = AnalyticsService(BASE_DIR)
+performance_service = PerformanceService(BASE_DIR)
+
 # ================================================================
 # Décorateurs
 # ================================================================
@@ -752,8 +924,7 @@ def get_parcels_by_bounds_adapted():
         )
 
     result = parcel_service.get_parcels_by_bounds(bounds)
-    # Renommer 'features' en 'data' pour correspondre à l'attente du service Angular
-    result['data'] = result.pop('features', [])
+    # 'features' est déjà renommé en 'data' dans get_parcels_by_bounds
     return jsonify(result)
 
 # --- Parcelles - Recherche ---
@@ -835,10 +1006,7 @@ def bulk_update_parcels():
     for i, update_info in enumerate(data.updates):
         parcel_id = update_info.get("id")
         update_data = update_info.get("data", {})
-        # Pour l'instant, on ne gère pas la mise à jour partielle via une API RESTful simple
-        # On devrait lire la parcelle existante, la modifier avec update_data, et la réécrire.
-        # Cela nécessite une méthode update_parcel dans ParcelService.
-        # Esquisse :
+        # Charger la parcelle existante
         existing_parcel = parcel_service.get_parcel(parcel_id)
         if not existing_parcel:
             errors.append({"id": parcel_id, "error": "Parcelle introuvable"})
@@ -901,6 +1069,15 @@ def get_parcel(parcel_id):
     if not parcel:
         return jsonify({"error": "Parcelle introuvable"}), 404
     return jsonify(parcel)
+
+@app.route('/api/parcels/<parcel_id>', methods=['PUT'])
+@handle_errors
+def update_parcel(parcel_id):
+    data = ParcelUpdateModel.parse_raw(request.data)
+    updated_parcel = parcel_service.update_parcel(parcel_id, data)
+    if not updated_parcel:
+        return jsonify({"error": "Parcelle introuvable"}), 404
+    return jsonify(updated_parcel)
 
 @app.route('/api/parcels/<parcel_id>', methods=['DELETE'])
 @handle_errors
@@ -1232,6 +1409,67 @@ def delete_file(category, filename):
     log.info(f"Fichier supprimé: {safe_filename}")
     return jsonify({"message": "Fichier supprimé", "filename": safe_filename})
 
+# --- Routes Analytics ---
+@app.route('/api/analytics/data', methods=['POST'])
+@handle_errors
+def log_analytics_data():
+    data = AnalyticsDataModel.parse_raw(request.data)
+    analytics_service.log_event(data)
+    return jsonify({"message": "Données analytics logguées", "event_type": data.event_type})
+
+@app.route('/api/analytics/summary', methods=['GET'])
+@handle_errors
+def get_analytics_summary():
+    summary = analytics_service.get_summary()
+    return jsonify({"data": summary})
+
+@app.route('/api/analytics/events', methods=['GET'])
+@handle_errors
+def get_analytics_events():
+    limit = request.args.get('limit', default=100, type=int)
+    # Lire les événements du fichier
+    events = analytics_service._read_events()
+    # Trier par timestamp descendant et limiter
+    sorted_events = sorted(events, key=lambda x: x['timestamp'], reverse=True)
+    paginated_events = sorted_events[:limit]
+    return jsonify({
+        "data": paginated_events,
+        "pagination": {
+            "limit": limit,
+            "offset": 0,
+            "total": len(events)
+        }
+    })
+
+@app.route('/api/analytics/behavior', methods=['POST'])
+@handle_errors
+def log_user_behavior():
+    data = UserBehaviorModel.parse_raw(request.data)
+    analytics_service.log_user_behavior(data)
+    return jsonify({"message": "Comportement utilisateur loggué", "action": data.action})
+
+# --- Routes Performance Metrics ---
+@app.route('/api/performance/metrics', methods=['POST'])
+@handle_errors
+def log_performance_metric():
+    data = PerformanceMetricsModel.parse_raw(request.data)
+    performance_service.log_metric(data)
+    return jsonify({"message": "Métrique performance logguée", "metric_name": data.metric_name})
+
+@app.route('/api/performance/metrics', methods=['GET'])
+@handle_errors
+def get_performance_metrics():
+    limit = request.args.get('limit', default=100, type=int)
+    metrics = performance_service.get_metrics(limit=limit)
+    return jsonify({
+        "data": metrics,
+        "pagination": {
+            "limit": limit,
+            "offset": 0,
+            "total": len(metrics) # Note: total est approximatif ici car on lit tout le fichier
+        }
+    })
+
 # --- Routes Admin -----
 @app.route('/api/admin/stats', methods=['GET'])
 @handle_errors
@@ -1317,6 +1555,7 @@ def api_docs():
             "parcels": {
                 "list": "GET /api/parcels?limit=100&offset=0&project_id=...",
                 "create": "POST /api/parcels",
+                "update": "PUT /api/parcels/{id}",
                 "by_bounds": "POST /api/parcels/bounds (body ou params)",
                 "search": "POST /api/parcels/search",
                 "bulk": {
@@ -1325,7 +1564,6 @@ def api_docs():
                     "delete": "DELETE /api/parcels/bulk"
                 },
                 "get": "GET /api/parcels/{id}",
-                "update": "PUT /api/parcels/{id}",
                 "delete": "DELETE /api/parcels/{id}"
             },
             "ogc": {
@@ -1343,6 +1581,16 @@ def api_docs():
             "crs": {
                 "transform": "POST /api/crs/transform",
                 "info": "GET /api/crs/info?epsg=32630"
+            },
+            "analytics": {
+                "log_data": "POST /api/analytics/data",
+                "log_behavior": "POST /api/analytics/behavior",
+                "summary": "GET /api/analytics/summary",
+                "events": "GET /api/analytics/events?limit=100"
+            },
+            "performance": {
+                "log_metric": "POST /api/performance/metrics",
+                "get_metrics": "GET /api/performance/metrics?limit=100"
             },
             "files": {
                 "upload": "POST /api/files/upload",
