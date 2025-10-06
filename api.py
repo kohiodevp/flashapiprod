@@ -327,7 +327,7 @@ class BulkParcelDeleteModel(BaseModel):
     ids: List[str]
 
 class ReportFormatModel(BaseModel):
-    format: str = Field("pdf", regex="^(pdf|png|jpg|jpeg)$") # Exemple de formats supportés
+    format: str = Field("pdf", pattern="^(pdf|png|jpg|jpeg)$") # Exemple de formats supportés
 
 # ================================================================
 # Service Projets (esquisse) ---
