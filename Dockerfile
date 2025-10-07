@@ -70,11 +70,14 @@ COPY requirements.txt /tmp/requirements.txt
 # --- Filtrer requirements.txt pour enlever les bibliothèques géospatiales et les dépendances de base installées via apt ---
 # Ces paquets sont gérés par apt et devraient être compatibles avec QGIS
 # On installe donc le reste via pip.
+# ATTENTION : Si la version installée par apt est trop ancienne, cette méthode échouera.
+# Mais elle évite les conflits de version pip/apt.
 RUN grep -v -E '^(GDAL|fiona|pyproj|shapely|geopandas|numpy|pandas)==.*$' /tmp/requirements.txt > /tmp/requirements_filtered.txt
 
-# Installer les paquets pip restants (sans réinstaller les dépendances de base ou géospatiales)
-# Utiliser --no-deps pour être sûr
-RUN pip3 install --no-cache-dir --no-deps -r /tmp/requirements_filtered.txt
+# Installer les paquets pip restants (SANS --no-deps cette fois)
+# Cela installera Flask et ses dépendances (click, itsdangerous, jinja2, werkzeug)
+# mais N'installera PAS les bibliothèques géospatiales de base (GDAL, fiona, etc.) car elles sont filtrées.
+RUN pip3 install --no-cache-dir -r /tmp/requirements_filtered.txt
 
 # Création structure dossiers
 RUN mkdir -p /opt/render/project/src/data/{shapefiles,csv,geojson,projects,other,tiles,parcels,documents,cache}
