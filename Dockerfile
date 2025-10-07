@@ -1,6 +1,13 @@
 # ================================================================
-# Dockerfile - Image optimisée QGIS + Flask (Version Corrigée - Alignement avec GDAL système de QGIS)
+# Dockerfile - Image optimisée QGIS + Flask (Utilisation d'une image QGIS existante)
 # ================================================================
+# Utiliser une image officielle de QGIS ou une image Ubuntu avec QGIS pré-installé
+# Exemple : Utilisation de l'image Ubuntu 22.04 avec dépôt QGIS
+# ATTENTION : Il se peut que des images QGIS officielles existent, à vérifier.
+# Sinon, on part d'une Ubuntu 22.04 et on installe QGIS *en premier* via apt.
+# Cette version tente de minimiser les installations via pip pour les composants QGIS.
+# On installe les paquets système QGIS, puis *seulement* les paquets Python non géospatiaux via pip.
+
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -10,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     QGIS_NO_OVERRIDE_IMPORT=1 \
     PORT=10000
 
-# --- Dépendances système de base (sans les python3-* géospatiaux pour l'instant) ---
+# --- Dépendances système de base ---
 RUN apt-get update && apt-get install -y \
     software-properties-common \
     gnupg \
@@ -23,9 +30,22 @@ RUN apt-get update && apt-get install -y \
     # Installer les bibliothèques C/C++ géospatiales système nécessaires pour QGIS
     gdal-bin \
     libgdal-dev \
-    # Installer les bibliothèques de base pour python
+    # Installer les bibliothèques de base pour python (souvent dépendances de qgis/python3-qgis)
     python3-numpy \
     python3-pandas \
+    python3-requests \
+    python3-flask \
+    python3-flask-cors \
+    python3-flask-compress \
+    python3-werkzeug \
+    python3-pydantic \
+    python3-passlib \
+    python3-jwt \
+    python3-redis \
+    python3-gunicorn \
+    python3-geopandas \
+    python3-shapely \
+    python3-pyproj \
     # Installer les dépendances Qt nécessaires pour QGIS
     libqt5gui5 \
     libqt5core5a \
@@ -38,7 +58,7 @@ RUN apt-get update && apt-get install -y \
 RUN wget -O - https://qgis.org/downloads/qgis-archive-keyring.gpg   | gpg --dearmor | tee /etc/apt/keyrings/qgis-archive-keyring.gpg > /dev/null
 RUN echo "deb [signed-by=/etc/apt/keyrings/qgis-archive-keyring.gpg] https://qgis.org/ubuntu   jammy main" > /etc/apt/sources.list.d/qgis.list
 
-# --- Installer QGIS (et ses dépendances, y compris la version C/C++ de GDAL) ---
+# --- Installer QGIS (et ses dépendances Python associées) ---
 RUN apt-get update || (sleep 10 && apt-get update) \
     && apt-get install -y \
     qgis \
@@ -48,53 +68,28 @@ RUN apt-get update || (sleep 10 && apt-get update) \
     qgis-providers \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# --- Lire la version de GDAL C/C++ installée par le paquet QGIS ---
-# Cela va déterminer les versions Python à installer via pip
-RUN ogrinfo --version > /tmp/gdal_version_full.txt 2>&1 || echo "3.6.4" > /tmp/gdal_version_full.txt # Valeur par défaut si erreur
-RUN cat /tmp/gdal_version_full.txt | grep -oP '\d+\.\d+\.\d+' | head -n1 > /tmp/gdal_version.txt || echo "3.6.4" > /tmp/gdal_version.txt
-RUN export GDAL_VERSION=$(cat /tmp/gdal_version.txt | xargs) && \
-    echo "Version GDAL C/C++ détectée (ou par défaut) : $GDAL_VERSION" && \
-    # Installer les paquets Python géospatiaux *spécifiques* compatibles avec cette version GDAL
-    # ATTENTION : Les versions pip doivent être compatibles avec la version GDAL C/C++
-    # Consultez les notes de version de Fiona, PyProj, Shapely, GeoPandas pour la compatibilité.
-    # Exemple pour GDAL 3.6.4 : Fiona 1.9.x, PyProj 3.4+, Shapely 2.0+, GeoPandas 0.14+
-    # Nous installons ici des versions *connues* pour être compatibles avec GDAL 3.6.x
-    # ou la dernière version stable qui l'est.
-    # Pour GDAL 3.6.4, Fiona 1.9.5 + PyProj 3.6.1 + Shapely 2.0.2 + GeoPandas 0.14.1 devraient fonctionner.
-    # MAIS assurez-vous que le wheel GDAL pip est compatible avec la version C/C++ installée.
-    # Si les versions de requirements.txt sont incompatibles, les forcer ici.
-    # On commence par installer GDAL lui-même via pip, ce qui est risqué mais parfois nécessaire.
-    # Il faut trouver une version de GDAL pip qui *fonctionne* avec la version C/C++ système.
-    # Essayons avec la version exacte ou la plus proche.
-    # IMPORTANT : La version de GDAL pip doit être identique ou très proche de la version C/C++.
-    # pip install GDAL==<version> --global-option=build_ext --global-option="-I/usr/include/gdal"
-    # Cependant, cette méthode est obsolète. Utiliser des wheels binaires est préférable.
-    # La meilleure façon est de trouver des wheels GDAL, Fiona, etc. compatibles.
-    # Pour Ubuntu 22.04 et QGIS 3.34.x, la version système de GDAL est probablement 3.6.x.
-    # On va tenter d'installer les versions de votre requirements.txt qui *devraient* être compatibles.
-    # Si cela échoue, il faudra peut-être ajuster ou utiliser des wheels spécifiques.
-    # Supposons que GDAL 3.6.4 C/C++ fonctionne avec GDAL pip 3.6.4.
-    pip3 install --no-cache-dir --no-binary=geopandas,shapely GDAL==$GDAL_VERSION && \
-    # Ensuite, installer Fiona avec une version compatible (vérifiez la compatibilité avec GDAL 3.6.4)
-    # Fiona 1.9.5 est dans votre requirements.txt
-    pip3 install --no-cache-dir --no-binary=:all: fiona==1.9.5 && \
-    # PyProj 3.6.1 est dans votre requirements.txt
-    pip3 install --no-cache-dir pyproj==3.6.1 && \
-    # Shapely 2.0.2 est dans votre requirements.txt
-    pip3 install --no-cache-dir shapely==2.0.2 && \
-    # Enfin, installer GeoPandas 0.14.1 (celle de votre requirements.txt)
-    # avec --no-deps pour éviter que pip ne réinstalle GDAL/Fiona/PyProj/Shapely
-    pip3 install --no-cache-dir --no-deps geopandas==0.14.1
+# --- Vérifier les versions système installées (utile pour le debug) ---
+RUN echo "--- Versions des bibliothèques géospatiales système (après installation QGIS) ---" && \
+    python3 -c "import gdal; print('GDAL Python (system):', gdal.__version__)" || echo "GDAL Python (system) not found" && \
+    python3 -c "import fiona; print('Fiona Python (system):', fiona.__version__)" || echo "Fiona Python (system) not found" && \
+    python3 -c "import pyproj; print('PyProj Python (system):', pyproj.__version__)" || echo "PyProj Python (system) not found" && \
+    python3 -c "import shapely; print('Shapely Python (system):', shapely.__version__)" || echo "Shapely Python (system) not found" && \
+    python3 -c "import geopandas; print('GeoPandas Python (system):', geopandas.__version__)" || echo "GeoPandas Python (system) not found" && \
+    ogrinfo --version || echo "GDAL CLI not found"
 
 # --- Installation des autres dépendances Python via pip ---
 # Copier requirements.txt
 COPY requirements.txt /tmp/requirements.txt
 
-# --- Filtrer requirements.txt pour enlever les bibliothèques géospatiales déjà installées ---
-RUN grep -v -E '^(GDAL|fiona|pyproj|shapely|geopandas|numpy|pandas)==.*$' /tmp/requirements.txt > /tmp/requirements_filtered.txt
+# --- Filtrer requirements.txt pour enlever les bibliothèques géospatiales et les dépendances de base déjà installées via apt ---
+# On suppose que geopandas, shapely, pyproj, numpy, pandas, gdal, fiona sont gérées par apt/python3-qgis/python3-geopandas
+# On installe donc le reste via pip.
+# ATTENTION : Si la version installée par apt est trop ancienne, cette méthode échouera.
+# Mais elle évite les conflits de version pip/apt.
+RUN grep -v -E '^(GDAL|fiona|pyproj|shapely|geopandas|numpy|pandas|requests|flask|flask-cors|flask-compress|werkzeug|pydantic|passlib|PyJWT|redis|gunicorn)==.*$' /tmp/requirements.txt > /tmp/requirements_filtered.txt
 
-# Installer les paquets pip restants (sans numpy/pandas/gdal/fiona/pyproj/shapely/geopandas)
-RUN pip3 install --no-cache-dir -r /tmp/requirements_filtered.txt
+# Installer les paquets pip restants (sans réinstaller les dépendances de base ou géospatiales)
+RUN pip3 install --no-cache-dir --no-deps -r /tmp/requirements_filtered.txt
 
 # Création structure dossiers
 RUN mkdir -p /opt/render/project/src/data/{shapefiles,csv,geojson,projects,other,tiles,parcels,documents,cache}
