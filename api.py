@@ -924,7 +924,7 @@ class ParcelService:
             except Exception as e:
                 log.error(f"Erreur lors de la lecture du fichier agrégat existant: {e}")
                 # Gérer selon la gravité - peut-être recréer vide ou lever une erreur
-                        
+                                
     def create_parcel(self, parcel_data: ParcelCreateModel) -> Dict[str, Any]:
         parcel_id = str(uuid.uuid4())
         try:
