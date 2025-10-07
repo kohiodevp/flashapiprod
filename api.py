@@ -108,34 +108,53 @@ try:
                 socket_timeout=3
             )
         redis_client.ping()
-        log.info("Redis connecte")
+        log.info("Redis connecté")
 except Exception as e:
     log.warning(f"Redis indisponible, utilisation cache fichier: {e}")
     redis_client = None
 
 def cache_get(key: str) -> Optional[bytes]:
     """Récupération cache avec fallback - retourne bytes"""
-    if redis_client:
-        try:
-            return redis_client.get(key)
-        except:
-            pass
-    with cache_lock:
-        return file_cache.get(key)
+    try:
+        if redis_client:
+            try:
+                value = redis_client.get(key)
+                if value is not None:
+                    return value
+            except Exception as e:
+                log.warning(f"Erreur cache Redis: {e}")
+        
+        # Fallback sur cache fichier
+        with cache_lock:
+            return file_cache.get(key)
+            
+    except Exception as e:
+        log.error(f"Erreur générale cache_get: {e}")
+        return None
 
 def cache_set(key: str, value: bytes, expire: int = 3600):
     """Enregistrement cache avec fallback - accepte bytes"""
-    if not isinstance(value, bytes):
-        value = json.dumps(value).encode('utf-8')
-    
-    if redis_client:
-        try:
-            redis_client.setex(key, expire, value)
-            return
-        except:
-            pass
-    with cache_lock:
-        file_cache[key] = value
+    try:
+        if not isinstance(value, bytes):
+            try:
+                value = json.dumps(value).encode('utf-8')
+            except Exception as e:
+                log.error(f"Erreur sérialisation cache: {e}")
+                return
+        
+        if redis_client:
+            try:
+                redis_client.setex(key, expire, value)
+                return
+            except Exception as e:
+                log.warning(f"Erreur cache_set Redis: {e}")
+        
+        # Fallback sur cache mémoire
+        with cache_lock:
+            file_cache[key] = value
+            
+    except Exception as e:
+        log.error(f"Erreur générale cache_set: {e}")
 
 # ================================================================
 # Rate limiting
@@ -170,7 +189,7 @@ def rate_limit(max_requests: int = 100, window_seconds: int = 60):
                 
                 if len(rate_limit_storage[client_id]) >= max_requests:
                     return jsonify({
-                        "error": "Trop de requetes",
+                        "error": "Trop de requêtes",
                         "retry_after": window_seconds
                     }), 429
                 
@@ -194,14 +213,22 @@ class QgisManager:
         self.qgs_app = None
         self.classes = {}
         self._lock = Lock()
+        self._init_success = False
     
     def initialize(self):
         with self._lock:
             if self._initialized:
-                return True, None
+                return self._init_success, "Déjà initialisé"
+            
             log.info("Initialisation QGIS...")
             try:
                 self._setup_qgis_environment()
+                
+                # Import Qt et QGIS
+                from PyQt5.QtCore import QSize, QByteArray, QBuffer, QIODevice
+                from PyQt5.QtGui import QColor, QFont, QImage, QPainter
+                
+                # Import QGIS components
                 from qgis.core import (
                     QgsApplication, QgsProject, QgsVectorLayer, QgsRasterLayer,
                     QgsMapSettings, QgsMapRendererParallelJob, QgsRectangle,
@@ -211,15 +238,16 @@ class QgisManager:
                     QgsLayoutPoint, QgsLayoutSize, QgsUnitTypes,
                     QgsCoordinateTransform, QgsLayoutItemLegend, QgsLayoutItemScaleBar
                 )
-                from PyQt5.QtCore import QSize, QByteArray, QBuffer, QIODevice
-                from PyQt5.QtGui import QColor, QFont, QImage, QPainter
                 
                 if not QgsApplication.instance():
                     self.qgs_app = QgsApplication([], False)
                     self.qgs_app.initQgis()
+                    log.info("QGIS Application créée")
                 else:
                     self.qgs_app = QgsApplication.instance()
+                    log.info("QGIS Application existante réutilisée")
                 
+                # Stocker les classes
                 self.classes = {
                     'QgsApplication': QgsApplication,
                     'QgsProject': QgsProject,
@@ -252,12 +280,16 @@ class QgisManager:
                     'QImage': QImage,
                     'QPainter': QPainter
                 }
+                
                 self._initialized = True
-                log.info("QGIS initialise")
+                self._init_success = True
+                log.info("QGIS initialisé avec succès")
                 return True, None
+                
             except Exception as e:
-                error_msg = f"Erreur initialisation QGIS: {e}"
+                error_msg = f"Erreur initialisation QGIS: {str(e)}"
                 log.error(error_msg, exc_info=True)
+                self._init_success = False
                 return False, error_msg
     
     def _setup_qgis_environment(self):
@@ -270,11 +302,11 @@ class QgisManager:
         })
     
     def is_initialized(self):
-        return self._initialized
+        return self._initialized and self._init_success
     
     def get_classes(self):
-        if not self._initialized:
-            raise RuntimeError("QGIS non initialise")
+        if not self.is_initialized():
+            raise RuntimeError("QGIS non initialisé ou initialisation échouée")
         return self.classes
 
 class ProjectSession:
@@ -320,7 +352,7 @@ def cleanup_expired_sessions():
                 if sess.project:
                     sess.project.clear()
                 del project_sessions[sid]
-                log.info(f"Session expiree: {sid}")
+                log.info(f"Session expirée: {sid}")
 
 # ================================================================
 # Modèles Pydantic
@@ -366,13 +398,13 @@ class ParcelCreateModel(BaseModel):
     @validator('geometry')
     def validate_geometry(cls, v):
         if not isinstance(v, dict) or 'type' not in v or 'coordinates' not in v:
-            raise ValueError('Geometrie GeoJSON invalide')
+            raise ValueError('Géométrie GeoJSON invalide')
         return v
     
     @validator('crs')
     def validate_crs(cls, v):
         if not v.startswith('EPSG:'):
-            raise ValueError('CRS doit etre EPSG:xxxx')
+            raise ValueError('CRS doit être EPSG:xxxx')
         try:
             CRS.from_epsg(int(v.split(':')[1]))
         except:
@@ -394,7 +426,7 @@ class ParcelUpdateModel(BaseModel):
     def validate_geometry(cls, v):
         if v is not None:
             if not isinstance(v, dict) or 'type' not in v or 'coordinates' not in v:
-                raise ValueError('Geometrie GeoJSON invalide')
+                raise ValueError('Géométrie GeoJSON invalide')
         return v
 
 class BoundsModel(BaseModel):
@@ -413,7 +445,7 @@ class CoordinateTransformModel(BaseModel):
     @validator('coordinates')
     def validate_coordinates(cls, v):
         if not v or not all(len(c) >= 2 for c in v):
-            raise ValueError('Coordonnees invalides')
+            raise ValueError('Coordonnées invalides')
         return v
 
 class ProjectModel(BaseModel):
@@ -486,7 +518,7 @@ def decode_token(token: str) -> Dict[str, Any]:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         return payload
     except jwt.ExpiredSignatureError:
-        raise ValueError("Token expire")
+        raise ValueError("Token expiré")
     except jwt.InvalidTokenError:
         raise ValueError("Token invalide")
 
@@ -506,7 +538,7 @@ def get_current_user_from_token(token: str) -> Dict[str, Any]:
         raise ValueError("Utilisateur introuvable")
     
     if not user.get('is_active', True):
-        raise ValueError("Compte desactive")
+        raise ValueError("Compte désactivé")
     
     return user
 
@@ -517,16 +549,31 @@ def handle_errors(f):
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
         try:
-            return f(*args, **kwargs)
+            start_time = time.time()
+            response = f(*args, **kwargs)
+            duration = time.time() - start_time
+            
+            # Log des performances
+            if duration > 1.0:  # Log uniquement les requêtes lentes
+                log.warning(f"Requête lente: {f.__name__} - {duration:.2f}s")
+            
+            return response
+            
         except ValidationError as e:
-            return jsonify({"error": "Validation", "details": e.errors()}), 400
+            log.warning(f"Erreur validation: {e.errors()}")
+            return jsonify({"error": "Données invalides", "details": e.errors()}), 400
         except ValueError as e:
+            log.warning(f"Erreur valeur: {str(e)}")
             return jsonify({"error": str(e)}), 400
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            log.warning(f"Fichier non trouvé: {str(e)}")
             return jsonify({"error": "Ressource introuvable"}), 404
+        except PermissionError as e:
+            log.error(f"Erreur permission: {str(e)}")
+            return jsonify({"error": "Accès non autorisé"}), 403
         except Exception as e:
-            log.error(f"Erreur: {e}", exc_info=True)
-            return jsonify({"error": "Erreur serveur"}), 500
+            log.error(f"Erreur inattendue dans {f.__name__}: {str(e)}", exc_info=True)
+            return jsonify({"error": "Erreur serveur interne"}), 500
     return wrapper
 
 def require_session(f):
@@ -591,7 +638,7 @@ def require_admin(f):
             user = get_current_user_from_token(token)
             
             if not user.get('is_admin', False):
-                return jsonify({"error": "Acces admin requis"}), 403
+                return jsonify({"error": "Accès admin requis"}), 403
             
             return f(*args, current_user=user, **kwargs)
         except ValueError as e:
@@ -631,17 +678,41 @@ class UserService:
         self._ensure_file()
     
     def _ensure_file(self):
+        """Crée le fichier users.json s'il n'existe pas"""
         if not self.users_file.exists():
-            with open(self.users_file, 'w') as f:
-                json.dump([], f)
+            try:
+                with open(self.users_file, 'w', encoding='utf-8') as f:
+                    json.dump([], f, ensure_ascii=False, indent=2)
+                log.info(f"Fichier utilisateurs créé: {self.users_file}")
+            except Exception as e:
+                log.error(f"Erreur création fichier utilisateurs: {e}")
+                raise
     
     def _read_users(self) -> List[Dict[str, Any]]:
-        with open(self.users_file, 'r') as f:
-            return json.load(f)
+        """Lecture des utilisateurs avec gestion d'erreur"""
+        try:
+            with open(self.users_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            log.error(f"Erreur lecture utilisateurs: {e}")
+            # Recréer le fichier si corrompu
+            self._ensure_file()
+            return []
     
     def _write_users(self, users: List[Dict[str, Any]]):
-        with open(self.users_file, 'w') as f:
-            json.dump(users, f, indent=2, default=str)
+        """Écriture des utilisateurs avec gestion d'erreur"""
+        try:
+            # Sauvegarde temporaire
+            temp_file = self.users_file.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(users, f, ensure_ascii=False, indent=2, default=str)
+            
+            # Remplacer le fichier original
+            temp_file.replace(self.users_file)
+            
+        except Exception as e:
+            log.error(f"Erreur écriture utilisateurs: {e}")
+            raise
     
     def _hash_password(self, password: str) -> str:
         return pwd_context.hash(password)
@@ -653,10 +724,10 @@ class UserService:
         users = self._read_users()
         
         if any(u['email'] == user_data.email for u in users):
-            raise ValueError("Email deja utilise")
+            raise ValueError("Email déjà utilisé")
         
         if any(u['username'] == user_data.username for u in users):
-            raise ValueError("Nom d'utilisateur deja utilise")
+            raise ValueError("Nom d'utilisateur déjà utilisé")
         
         user_id = str(uuid.uuid4())
         user = {
@@ -673,7 +744,7 @@ class UserService:
         
         users.append(user)
         self._write_users(users)
-        log.info(f"Utilisateur cree: {user_data.email}")
+        log.info(f"Utilisateur créé: {user_data.email}")
         
         user_safe = {k: v for k, v in user.items() if k != 'password_hash'}
         return user_safe
@@ -686,7 +757,7 @@ class UserService:
             return None
         
         if not user.get('is_active', True):
-            raise ValueError("Compte desactive")
+            raise ValueError("Compte désactivé")
         
         if not self._verify_password(password, user['password_hash']):
             return None
@@ -712,7 +783,7 @@ class UserService:
                     raise ValueError("Ancien mot de passe incorrect")
                 users[i]['password_hash'] = self._hash_password(new_password)
                 self._write_users(users)
-                log.info(f"Mot de passe change pour: {user['email']}")
+                log.info(f"Mot de passe changé pour: {user['email']}")
                 return True
         return False
 
@@ -751,7 +822,7 @@ class ProjectService:
         projects.append(project_dict)
         with open(self.projects_file, 'w') as f:
             json.dump(projects, f, indent=2)
-        log.info(f"Projet cree: {project_id}")
+        log.info(f"Projet créé: {project_id}")
         return project_dict
     
     def update_project(self, project_id: str, project_data: ProjectModel) -> Optional[Dict[str, Any]]:
@@ -762,7 +833,7 @@ class ProjectService:
                 projects[i].update(update_data)
                 with open(self.projects_file, 'w') as f:
                     json.dump(projects, f, indent=2)
-                log.info(f"Projet mis a jour: {project_id}")
+                log.info(f"Projet mis à jour: {project_id}")
                 return projects[i]
         return None
     
@@ -773,7 +844,7 @@ class ProjectService:
                 del projects[i]
                 with open(self.projects_file, 'w') as f:
                     json.dump(projects, f, indent=2)
-                log.info(f"Projet supprime: {project_id}")
+                log.info(f"Projet supprimé: {project_id}")
                 return True
         return False
 
@@ -795,7 +866,7 @@ class AnalyticsService:
         events = self._read_events()
         events.append(event_data.dict())
         self._write_events(events)
-        log.info(f"Evenement loggue: {event_data.event_type}")
+        log.info(f"Événement loggué: {event_data.event_type}")
     
     def get_summary(self):
         events = self._read_events()
@@ -819,7 +890,7 @@ class AnalyticsService:
         behavior = self._read_behavior()
         behavior.append(behavior_data.dict())
         self._write_behavior(behavior)
-        log.info(f"Comportement utilisateur loggue: {behavior_data.action}")
+        log.info(f"Comportement utilisateur loggué: {behavior_data.action}")
     
     def _read_events(self) -> List[Dict[str, Any]]:
         with open(self.events_file, 'r') as f:
@@ -852,7 +923,7 @@ class PerformanceService:
         metrics = self._read_metrics()
         metrics.append(metric_data.dict())
         self._write_metrics(metrics)
-        log.info(f"Metrique logguee: {metric_data.metric_name}")
+        log.info(f"Métrique logguée: {metric_data.metric_name}")
     
     def get_metrics(self, limit: Optional[int] = 100):
         metrics = self._read_metrics()
@@ -876,107 +947,47 @@ class ParcelService:
         self._ensure_aggregate()
     
     def _ensure_aggregate(self):
+        """Crée le fichier agrégé des parcelles - version robuste"""
         if not self.all_parcels_file.exists():
-            # Créer un GeoDataFrame temporaire avec une ligne vide/factice pour contourner la limitation
-            # de certaines versions de geopandas qui refusent d'écrire un GeoDataFrame complètement vide.
             try:
-                # Essayez d'abord la méthode originale (pour les versions récentes de geopandas)
-                empty_gdf = gpd.GeoDataFrame(
-                    columns=["id", "name", "commune", "section", "numero", "superficie_m2", "geometry"],
-                    crs=self.default_crs
-                )
+                # Créer un GeoDataFrame avec une structure vide mais valide
+                empty_gdf = gpd.GeoDataFrame({
+                    'id': pd.Series(dtype='str'),
+                    'name': pd.Series(dtype='str'),
+                    'commune': pd.Series(dtype='str'),
+                    'section': pd.Series(dtype='str'),
+                    'numero': pd.Series(dtype='str'),
+                    'superficie_m2': pd.Series(dtype='float'),
+                    'superficie_ha': pd.Series(dtype='float'),
+                    'perimetre_m': pd.Series(dtype='float'),
+                    'proprietaire': pd.Series(dtype='str'),
+                    'usage': pd.Series(dtype='str'),
+                    'centroid_x': pd.Series(dtype='float'),
+                    'centroid_y': pd.Series(dtype='float'),
+                    'created_at': pd.Series(dtype='str'),
+                    'geometry': []
+                }, crs=self.default_crs)
+                
+                # Sauvegarder avec une géométrie vide
                 empty_gdf.to_file(self.all_parcels_file, driver="GeoJSON")
-            except ValueError as e:
-                if "Cannot write empty DataFrame to file" in str(e):
-                    log.warning(f"GeoPandas ne permet pas d'écrire un GeoDataFrame vide. Utilisation d'un contournement.")
-                    # Contournement : créer avec une ligne factice, puis la supprimer
-                    temp_row = gpd.GeoDataFrame([{
-                        'id': 'temp_id',
-                        'name': '',
-                        'commune': '',
-                        'section': '',
-                        'numero': '',
-                        'superficie_m2': 0.0,
-                        'geometry': None # ou gpd.points_from_xy([0], [0])[0] pour un point nul
-                    }], crs=self.default_crs)
-                    temp_row.to_file(self.all_parcels_file, driver="GeoJSON")
-                    # Relire et supprimer la ligne temporaire
-                    gdf = gpd.read_file(self.all_parcels_file)
-                    gdf_filtered = gdf[gdf['id'] != 'temp_id'] # Supprimer la ligne factice
-                    # Si le résultat est vide (ce qui est le but initial), ne pas l'écrire.
-                    # On se contente de laisser le fichier existant (avec la ligne temporaire) ou d'écrire un GeoDataFrame avec une ligne vide de métadonnées.
-                    # La façon la plus simple de contourner définitivement l'écriture d'un vide est de ne *jamais* écrire un GeoDataFrame vide.
-                    # On écrit donc le gdf filtré *seulement s'il n'est pas vide*, sinon on laisse le fichier vide ou on le supprime et on le recrée vide d'une autre manière.
-                    # OU BIEN : On s'assure que le fichier résultant n'est *jamais* vide en termes de structure de données, même s'il n'y a pas de parcelles.
-                    # La solution la plus robuste : Si gdf_filtered est vide, on ne fait rien de plus, le fichier avec la ligne temporaire est déjà créé.
-                    # OU : On recrée un GeoDataFrame vide *après* avoir supprimé la ligne temporaire, mais sans les données.
-                    # Solution retenue : Si le gdf filtré est vide, on recrée un GeoDataFrame vide avec la bonne structure et CRS, et on l'écrase.
-                    if gdf_filtered.empty:
-                        # Recréer un GeoDataFrame vide avec la structure correcte
-                        empty_correct_gdf = gpd.GeoDataFrame(
-                            columns=["id", "name", "commune", "section", "numero", "superficie_m2", "geometry"],
-                            crs=self.default_crs
-                        )
-                        # Ce GeoDataFrame est toujours "non vide" en terme de structure, mais sans lignes de données.
-                        # Certaines versions de geopandas refusent toujours d'écrire cela.
-                        # Donc, on fait un dernier contournement : on ajoute une ligne factice, on l'écrit, on la relit, on la supprime, on réécrit.
-                        # Mais c'est redondant avec le premier contournement.
-                        # La réalité est que si geopandas ne peut pas écrire un GeoDataFrame vide (même avec structure), on ne peut pas le forcer.
-                        # La seule solution est de s'assurer que le fichier *existe* mais peut être vide de contenu significatif.
-                        # On va donc écrire le fichier avec la ligne temporaire, puis le laisser tel quel si le filtrage le rend vide.
-                        # Ou alors, on écrit un GeoDataFrame avec une ligne vide (geometry=None) mais *sans* la supprimer.
-                        # Pour contourner cela proprement, on peut écrire un GeoDataFrame avec une seule ligne contenant des valeurs nulles/vides et une géométrie None.
-                        # Puis, dans les autres méthodes (_update_aggregate), on s'assure de ne jamais laisser que ces lignes vides.
-                        # Mais pour _ensure_aggregate, on se contente de créer le fichier avec UNE ligne vide si nécessaire.
-                        # La méthode originale de création d'une ligne factice et de la suppression fonctionne, mais on ne doit PAS réécrire le résultat vide.
-                        # Donc, si gdf_filtered est vide, on ne fait rien de plus, le fichier avec la ligne temporaire est créé.
-                        # Cependant, cela laisse une ligne factice dans le fichier vide, ce qui n'est pas idéal.
-                        # Solution finale : Ne pas écrire le gdf filtré s'il est vide. Le fichier contiendra la ligne temporaire.
-                        # Lors de la première mise à jour via _update_aggregate, le fichier sera recréé proprement.
-                        # Mais _ensure_aggregate doit garantir un fichier valide vide.
-                        # On va donc réutiliser la logique du contournement : écrire la ligne factice, la relire, la supprimer, et écrire un GeoDataFrame *structurellement vide*.
-                        # Cela signifie que la version de geopandas est vraiment restrictive.
-                        # On réessaie la création "normale" après avoir nettoyé la ligne temporaire.
-                        # On ne peut pas écrire un GeoDataFrame vide de structure. Donc, on ne le fait pas.
-                        # On laisse le fichier avec la ligne temporaire. C'est un "état intermédiaire".
-                        # La méthode _update_aggregate gérera les cas réels.
-                        # Pour satisfaire le besoin initial de *créer* un fichier vide, on peut créer un fichier GeoJSON vide "à la main".
-                        # Mais c'est moins robuste.
-                        # On va rester sur l'approche : écrire la ligne temporaire, la relire, la supprimer, et ne *rien écrire* si le résultat est vide.
-                        # Cela signifie que le fichier *existe* mais n'a pas été réécrit comme vide.
-                        # Gérons cela différemment : On crée le fichier avec la ligne temporaire. C'est un GeoJSON valide avec une entrée.
-                        # Puis on le relit, le filtre (ce qui donne un vide), et on ne fait rien de plus ici.
-                        # Le fichier *existe*, c'est le principal pour éviter de retomber dans cette fonction.
-                        # Lors de la première vraie opération de mise à jour, _update_aggregate sera appelée et gérera le contenu réel.
-                        # Si on veut absolument un fichier *physiquement vide* de données, on ne peut pas avec geopandas.
-                        # On crée donc le fichier avec une ligne factice et on le considère comme "initialisé".
-                        # On ne réécrit pas `gdf_filtered` s'il est vide.
-                        pass # On ne fait rien de plus si le gdf filtré est vide. Le fichier avec la ligne temporaire existe.
-                    else:
-                        # Si le gdf filtré n'est pas vide (ce qui ne devrait pas arriver ici car on part d'un vide initial),
-                        # on l'écrit normalement.
-                        gdf_filtered.to_file(self.all_parcels_file, driver="GeoJSON")
-                        log.info(f"Fichier agrégat initial créé avec des données (inattendu mais géré): {self.all_parcels_file}")
-
-                else:
-                    # Si ce n'est pas l'erreur spécifique, la lever
-                    raise e
+                log.info(f"Fichier agrégé créé: {self.all_parcels_file}")
+                
             except Exception as e:
-                # Si une autre erreur survient lors de la création initiale
-                log.error(f"Erreur lors de la création initiale du fichier agrégat: {e}")
-                raise # Relancer l'erreur pour que l'initialisation échoue proprement
-        else:
-            # Si le fichier existe, assurez-vous qu'il a la structure correcte
-            # (optionnel, mais bon pour la robustesse)
-            try:
-                existing_gdf = gpd.read_file(self.all_parcels_file)
-                required_cols = {"id", "name", "commune", "section", "numero", "superficie_m2", "geometry"}
-                if not required_cols.issubset(set(existing_gdf.columns)):
-                    log.warning(f"Le fichier agrégat {self.all_parcels_file} a une structure inattendue.")
-                    # Vous pouvez choisir de le recréer ou de l'ajuster ici si nécessaire
-            except Exception as e:
-                log.error(f"Erreur lors de la lecture du fichier agrégat existant: {e}")
-                # Gérer selon la gravité - peut-être recréer vide ou lever une erreur
+                log.error(f"Erreur création fichier agrégé: {e}")
+                # Créer un fichier GeoJSON vide manuellement
+                empty_geojson = {
+                    "type": "FeatureCollection",
+                    "features": [],
+                    "crs": {
+                        "type": "name",
+                        "properties": {
+                            "name": self.default_crs
+                        }
+                    }
+                }
+                with open(self.all_parcels_file, 'w') as f:
+                    json.dump(empty_geojson, f)
+                log.info(f"Fichier agrégé créé (méthode alternative): {self.all_parcels_file}")
 
     def create_parcel(self, parcel_data: ParcelCreateModel) -> Dict[str, Any]:
         parcel_id = str(uuid.uuid4())
@@ -1017,7 +1028,7 @@ class ParcelService:
             
             self._update_aggregate()
             
-            log.info(f"Parcelle creee: {parcel_id}")
+            log.info(f"Parcelle créée: {parcel_id}")
             return {
                 'id': parcel_id,
                 'name': parcel_data.name,
@@ -1028,7 +1039,7 @@ class ParcelService:
                 'crs': self.default_crs
             }
         except Exception as e:
-            log.error(f"Erreur creation parcelle: {e}")
+            log.error(f"Erreur création parcelle: {e}")
             raise
     
     def update_parcel(self, parcel_id: str, parcel_data: ParcelUpdateModel) -> Optional[Dict[str, Any]]:
@@ -1060,13 +1071,13 @@ class ParcelService:
             
             gdf.to_file(parcel_file, driver='GeoJSON')
             self._update_aggregate()
-            log.info(f"Parcelle mise a jour: {parcel_id}")
+            log.info(f"Parcelle mise à jour: {parcel_id}")
             
             updated_data = gdf.iloc[0].to_dict()
             updated_data['geometry'] = mapping(gdf.geometry.iloc[0])
             return updated_data
         except Exception as e:
-            log.error(f"Erreur mise a jour parcelle: {e}")
+            log.error(f"Erreur mise à jour parcelle: {e}")
             return None
     
     def _transform_geometry(self, geometry: Dict, from_crs: str, to_crs: str):
@@ -1086,9 +1097,9 @@ class ParcelService:
                 merged = pd.concat(gdfs, ignore_index=True)
                 merged_gdf = gpd.GeoDataFrame(merged, crs=self.default_crs)
                 merged_gdf.to_file(self.all_parcels_file, driver="GeoJSON")
-                log.info(f"Agregat mis a jour: {len(gdfs)} parcelles")
+                log.info(f"Agrégat mis à jour: {len(gdfs)} parcelles")
         except Exception as e:
-            log.error(f"Erreur mise a jour agregat: {e}")
+            log.error(f"Erreur mise à jour agrégat: {e}")
     
     def get_parcels_by_bounds(self, bounds: BoundsModel) -> Dict[str, Any]:
         try:
@@ -1119,7 +1130,7 @@ class ParcelService:
                 'crs': self.default_crs
             }
         except Exception as e:
-            log.error(f"Erreur recuperation par emprise: {e}")
+            log.error(f"Erreur récupération par emprise: {e}")
             raise
     
     def get_parcel(self, parcel_id: str, output_crs: str = None) -> Optional[Dict]:
@@ -1147,7 +1158,7 @@ class ParcelService:
         try:
             parcel_file.unlink()
             self._update_aggregate()
-            log.info(f"Parcelle supprimee: {parcel_id}")
+            log.info(f"Parcelle supprimée: {parcel_id}")
             return True
         except Exception as e:
             log.error(f"Erreur suppression: {e}")
@@ -1211,7 +1222,7 @@ def register():
         refresh_token = create_refresh_token(user['id'])
         
         return jsonify({
-            "message": "Utilisateur cree avec succes",
+            "message": "Utilisateur créé avec succès",
             "user": user,
             "access_token": access_token,
             "refresh_token": refresh_token,
@@ -1240,7 +1251,7 @@ def login():
         refresh_token = create_refresh_token(user['id'])
         
         return jsonify({
-            "message": "Connexion reussie",
+            "message": "Connexion réussie",
             "user": user,
             "access_token": access_token,
             "refresh_token": refresh_token,
@@ -1258,7 +1269,7 @@ def refresh():
         payload = decode_token(data.refresh_token)
         
         if payload.get('type') != 'refresh':
-            return jsonify({"error": "Token de rafraichissement invalide"}), 401
+            return jsonify({"error": "Token de rafraîchissement invalide"}), 401
         
         user_id = payload.get('sub')
         user = user_service.get_user_by_id(user_id)
@@ -1284,8 +1295,8 @@ def refresh():
 @require_auth
 @handle_errors
 def logout(current_user):
-    log.info(f"Deconnexion: {current_user['email']}")
-    return jsonify({"message": "Deconnexion reussie"})
+    log.info(f"Déconnexion: {current_user['email']}")
+    return jsonify({"message": "Déconnexion réussie"})
 
 @app.route('/api/auth/me', methods=['GET'])
 @require_auth
@@ -1306,7 +1317,7 @@ def change_password_route(current_user):
         )
         
         if success:
-            return jsonify({"message": "Mot de passe modifie"})
+            return jsonify({"message": "Mot de passe modifié"})
         return jsonify({"error": "Erreur modification"}), 400
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1357,7 +1368,7 @@ def delete_project_route(project_id, current_user):
     success = project_service.delete_project(project_id)
     if not success:
         return jsonify({"error": "Projet introuvable"}), 404
-    return jsonify({"message": "Projet supprime", "id": project_id})
+    return jsonify({"message": "Projet supprimé", "id": project_id})
 
 # ================================================================
 # Routes Parcelles
@@ -1426,7 +1437,7 @@ def get_parcels_by_bounds_route(current_user):
             data = BoundsModel.parse_raw(request.data)
             bounds = data
         except ValidationError:
-            return jsonify({"error": "Parametres minx, miny, maxx, maxy requis"}), 400
+            return jsonify({"error": "Paramètres minx, miny, maxx, maxy requis"}), 400
     else:
         bounds = BoundsModel(
             minx=minx, miny=miny, maxx=maxx, maxy=maxy, crs=crs, buffer_m=buffer_m
@@ -1448,7 +1459,7 @@ def search_parcels(current_user):
     try:
         gdf = gpd.read_file(parcel_service.all_parcels_file)
     except Exception as e:
-        log.error(f"Erreur lecture fichier agregat pour recherche: {e}")
+        log.error(f"Erreur lecture fichier agrégat pour recherche: {e}")
         return jsonify({"error": "Erreur interne"}), 500
     
     mask = pd.Series([True] * len(gdf))
@@ -1540,7 +1551,7 @@ def bulk_update_parcels(current_user):
             gdf.to_file(parcel_file, driver='GeoJSON')
             parcel_service._update_aggregate()
             updated_ids.append(parcel_id)
-            log.info(f"Parcelle mise a jour: {parcel_id}")
+            log.info(f"Parcelle mise à jour: {parcel_id}")
         except Exception as e:
             errors.append({"id": parcel_id, "error": str(e)})
     
@@ -1587,7 +1598,7 @@ def update_parcel(parcel_id, current_user):
 def delete_parcel(parcel_id, current_user):
     if not parcel_service.delete_parcel(parcel_id):
         return jsonify({"error": "Parcelle introuvable"}), 404
-    return jsonify({"message": "Parcelle supprimee", "id": parcel_id})
+    return jsonify({"message": "Parcelle supprimée", "id": parcel_id})
 
 # ================================================================
 # Routes CRS
@@ -1621,7 +1632,7 @@ QGIS_BIN = "/usr/lib/cgi-bin/qgis_mapserv.fcgi"
 @handle_errors
 def ogc_service(service):
     if service.upper() not in ['WMS', 'WFS', 'WCS']:
-        return jsonify({"error": "Service non supporte"}), 400
+        return jsonify({"error": "Service non supporté"}), 400
     
     if not os.path.isfile(QGIS_BIN):
         return jsonify({"error": "QGIS Server absent"}), 503
@@ -1632,7 +1643,7 @@ def ogc_service(service):
     if map_param:
         project_file = str((PROJECTS_DIR / map_param).resolve())
         if not project_file.startswith(str(PROJECTS_DIR)):
-            return jsonify({"error": "Projet non autorise"}), 403
+            return jsonify({"error": "Projet non autorisé"}), 403
     else:
         project_file = str(DEFAULT_PROJECT)
     
@@ -1687,11 +1698,11 @@ def ogc_service(service):
 def generate_parcel_report(parcel_id, session):
     format_requested = request.args.get('format', 'pdf').lower()
     if format_requested not in ['pdf', 'png', 'jpg', 'jpeg']:
-        return jsonify({"error": "Format non supporte"}), 400
+        return jsonify({"error": "Format non supporté"}), 400
     
     qgis_mgr = get_qgis_manager()
     if not qgis_mgr.is_initialized():
-        return jsonify({"error": "QGIS non initialise"}), 500
+        return jsonify({"error": "QGIS non initialisé"}), 500
     
     parcel = parcel_service.get_parcel(parcel_id)
     if not parcel:
@@ -1763,7 +1774,7 @@ def generate_parcel_report(parcel_id, session):
             f"Commune : {parcel['commune']}\n"
             f"Section : {parcel['section']} - N {parcel['numero']}\n"
             f"Superficie : {parcel['superficie_ha']} ha ({parcel['superficie_m2']} m2)\n"
-            f"Perimetre : {parcel.get('perimetre_m', 'N/A')} m\n"
+            f"Périmètre : {parcel.get('perimetre_m', 'N/A')} m\n"
             f"Date : {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
         )
         info_label = QgsLayoutItemLabel(layout)
@@ -1780,7 +1791,7 @@ def generate_parcel_report(parcel_id, session):
             pdf_buffer.open(QIODevice.WriteOnly)
             result = exporter.exportToPdf(pdf_buffer, QgsLayoutExporter.PdfExportSettings())
             if result != QgsLayoutExporter.Success:
-                return jsonify({"error": "Echec export PDF"}), 500
+                return jsonify({"error": "Échec export PDF"}), 500
             output_bytes = bytes(pdf_data)
             mimetype = 'application/pdf'
         else:
@@ -1799,7 +1810,7 @@ def generate_parcel_report(parcel_id, session):
             buffer.open(QIODevice.WriteOnly)
             success = image.save(buffer, format_requested.upper() if format_requested != 'jpg' else 'JPEG')
             if not success:
-                return jsonify({"error": "Echec export image"}), 500
+                return jsonify({"error": "Échec export image"}), 500
             output_bytes = bytes(ba)
             mimetype = f"image/{format_requested}"
         
@@ -1812,13 +1823,13 @@ def generate_parcel_report(parcel_id, session):
             download_name=f"parcel_{parcel_id}.{format_requested}"
         )
     except Exception as e:
-        log.error(f"Erreur generation {format_requested.upper()}: {e}", exc_info=True)
-        return jsonify({"error": f"Erreur generation rapport: {str(e)}"}), 500
+        log.error(f"Erreur génération {format_requested.upper()}: {e}", exc_info=True)
+        return jsonify({"error": f"Erreur génération rapport: {str(e)}"}), 500
 
 @app.route('/api/reports/project/<project_id>', methods=['GET'])
 @handle_errors
 def generate_project_report(project_id):
-    return jsonify({"error": "Generation de rapport projet non implementee"}), 501
+    return jsonify({"error": "Génération de rapport projet non implémentée"}), 501
 
 # ================================================================
 # Routes Fichiers
@@ -1834,7 +1845,7 @@ def upload_file(current_user):
     category = request.form.get('category', 'other')
     
     if not file.filename or category not in CATEGORIES:
-        return jsonify({"error": "Fichier ou categorie invalide"}), 400
+        return jsonify({"error": "Fichier ou catégorie invalide"}), 400
     
     filename = secure_filename(file.filename)
     file_id = str(uuid.uuid4())
@@ -1862,9 +1873,9 @@ def upload_file(current_user):
                     'bounds': gdf.total_bounds.tolist() if not gdf.empty else None
                 }
             except Exception as e:
-                log.warning(f"Impossible de lire metadonnees geo: {e}")
+                log.warning(f"Impossible de lire métadonnées geo: {e}")
         
-        log.info(f"Fichier uploade: {filename}")
+        log.info(f"Fichier uploadé: {filename}")
         return jsonify(file_info), 201
     except Exception as e:
         if filepath.exists():
@@ -1876,7 +1887,7 @@ def upload_file(current_user):
 @handle_errors
 def list_files(category, current_user):
     if category not in CATEGORIES:
-        return jsonify({"error": "Categorie invalide"}), 400
+        return jsonify({"error": "Catégorie invalide"}), 400
     
     files = []
     for file_path in (BASE_DIR / category).glob("*"):
@@ -1900,7 +1911,7 @@ def list_files(category, current_user):
 @handle_errors
 def download_file(category, filename, current_user):
     if category not in CATEGORIES:
-        return jsonify({"error": "Categorie invalide"}), 400
+        return jsonify({"error": "Catégorie invalide"}), 400
     
     safe_filename = secure_filename(filename)
     file_path = BASE_DIR / category / safe_filename
@@ -1915,7 +1926,7 @@ def download_file(category, filename, current_user):
 @handle_errors
 def delete_file(category, filename, current_user):
     if category not in CATEGORIES:
-        return jsonify({"error": "Categorie invalide"}), 400
+        return jsonify({"error": "Catégorie invalide"}), 400
     
     safe_filename = secure_filename(filename)
     file_path = BASE_DIR / category / safe_filename
@@ -1924,8 +1935,8 @@ def delete_file(category, filename, current_user):
         return jsonify({"error": "Fichier introuvable"}), 404
     
     file_path.unlink()
-    log.info(f"Fichier supprime: {safe_filename}")
-    return jsonify({"message": "Fichier supprime", "filename": safe_filename})
+    log.info(f"Fichier supprimé: {safe_filename}")
+    return jsonify({"message": "Fichier supprimé", "filename": safe_filename})
 
 # ================================================================
 # Routes Analytics
@@ -1936,7 +1947,7 @@ def delete_file(category, filename, current_user):
 def log_analytics_data(current_user):
     data = AnalyticsDataModel.parse_raw(request.data)
     analytics_service.log_event(data)
-    return jsonify({"message": "Donnees analytics logguees", "event_type": data.event_type})
+    return jsonify({"message": "Données analytics logguées", "event_type": data.event_type})
 
 @app.route('/api/analytics/summary', methods=['GET'])
 @optional_auth
@@ -1970,7 +1981,7 @@ def log_user_behavior(current_user):
     if current_user:
         data.user_id = current_user['id']
     analytics_service.log_user_behavior(data)
-    return jsonify({"message": "Comportement utilisateur loggue", "action": data.action})
+    return jsonify({"message": "Comportement utilisateur loggué", "action": data.action})
 
 # ================================================================
 # Routes Performance Metrics
@@ -1981,7 +1992,7 @@ def log_user_behavior(current_user):
 def log_performance_metric(current_user):
     data = PerformanceMetricsModel.parse_raw(request.data)
     performance_service.log_metric(data)
-    return jsonify({"message": "Metrique performance logguee", "metric_name": data.metric_name})
+    return jsonify({"message": "Métrique performance logguée", "metric_name": data.metric_name})
 
 @app.route('/api/performance/metrics', methods=['GET'])
 @optional_auth
@@ -2056,7 +2067,7 @@ def clear_cache(current_user):
         cleared["file_cache"] = True
     
     return jsonify({
-        "message": "Cache nettoye",
+        "message": "Cache nettoyé",
         "cleared": cleared,
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
@@ -2086,7 +2097,7 @@ def system_stats(current_user):
 def api_docs():
     return jsonify({
         "version": "3.2.0",
-        "title": "API QGIS Server - Optimisee Mobile avec Auth JWT",
+        "title": "API QGIS Server - Optimisée Mobile avec Auth JWT",
         "default_crs": DEFAULT_CRS,
         "authentication": {
             "type": "JWT Bearer Token",
@@ -2223,16 +2234,48 @@ def api_docs():
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    return jsonify({
+    """Endpoint de santé complet"""
+    health_status = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "3.2.0",
         "services": {
             "qgis": get_qgis_manager().is_initialized(),
-            "redis": redis_client.ping() if redis_client else False,
-            "default_crs": DEFAULT_CRS
+            "redis": bool(redis_client),
+            "storage": {
+                "available": BASE_DIR.exists(),
+                "writable": os.access(BASE_DIR, os.W_OK)
+            }
         }
-    })
+    }
+    
+    # Vérifications détaillées
+    try:
+        # Test écriture storage
+        test_file = BASE_DIR / "health_check.txt"
+        test_file.write_text("health_check")
+        test_file.unlink()
+        health_status["services"]["storage"]["writable"] = True
+    except Exception as e:
+        health_status["services"]["storage"]["writable"] = False
+        health_status["status"] = "degraded"
+        log.warning(f"Storage non accessible: {e}")
+    
+    # Vérification Redis
+    if redis_client:
+        try:
+            redis_client.ping()
+            health_status["services"]["redis"] = True
+        except Exception as e:
+            health_status["services"]["redis"] = False
+            health_status["status"] = "degraded"
+            log.warning(f"Redis non accessible: {e}")
+    
+    # Vérification QGIS
+    if not health_status["services"]["qgis"]:
+        health_status["status"] = "degraded"
+    
+    return jsonify(health_status)
 
 @app.route('/', methods=['GET'])
 def index():
@@ -2274,33 +2317,59 @@ def internal_error(error):
     return jsonify({"error": "Erreur serveur interne"}), 500
 
 # ================================================================
-# Point d'entree
+# Initialisation sécurisée
 # ================================================================
-if __name__ == '__main__':
+def initialize_services():
+    """Initialisation sécurisée de tous les services"""
+    log.info("Initialisation des services...")
+    
+    # Initialisation QGIS
     qgis_mgr = get_qgis_manager()
     success, error = qgis_mgr.initialize()
+    
     if not success:
-        log.error(f"Echec initialisation QGIS: {error}")
-        sys.exit(1)
+        log.error(f"Échec initialisation QGIS: {error}")
+        # Ne pas quitter, l'API peut fonctionner sans QGIS pour certaines routes
     
-    cleanup_thread = Thread(target=cleanup_expired_sessions, daemon=True)
-    cleanup_thread.start()
+    # Vérification des dossiers
+    required_dirs = [BASE_DIR, PROJECTS_DIR, CACHE_DIR, TILES_DIR]
+    for directory in required_dirs:
+        directory.mkdir(parents=True, exist_ok=True)
+        if not directory.exists():
+            log.error(f"Impossible de créer le dossier: {directory}")
     
-    log.info("=" * 70)
-    log.info("API QGIS Server v3.2.0 - Optimisee pour Render & Mobile + Auth JWT")
-    log.info(f"Donnees: {BASE_DIR}")
-    log.info(f"CRS par defaut: {DEFAULT_CRS}")
-    log.info(f"Redis: {'Active' if redis_client else 'Cache fichier'}")
-    log.info(f"QGIS: {'Initialise' if qgis_mgr.is_initialized() else 'Erreur'}")
-    log.info(f"Sessions: Timeout {SESSION_TIMEOUT.seconds // 60}min")
-    log.info(f"JWT: Access {JWT_ACCESS_TOKEN_EXPIRE_MINUTES}min / Refresh {JWT_REFRESH_TOKEN_EXPIRE_DAYS}j")
-    log.info("=" * 70)
+    # Démarrage du nettoyage des sessions
+    try:
+        cleanup_thread = Thread(target=cleanup_expired_sessions, daemon=True)
+        cleanup_thread.start()
+        log.info("Thread de nettoyage des sessions démarré")
+    except Exception as e:
+        log.error(f"Erreur démarrage thread nettoyage: {e}")
+    
+    log.info("Initialisation des services terminée")
+
+# ================================================================
+# Point d'entrée
+# ================================================================
+if __name__ == '__main__':
+    # Initialisation avant démarrage
+    initialize_services()
     
     port = int(os.getenv('PORT', 10000))
     debug = os.getenv('DEBUG', 'False').lower() == 'true'
     
+    log.info("=" * 70)
+    log.info("API QGIS Server v3.2.0 - Optimisée pour Render & Mobile + Auth JWT")
+    log.info(f"Données: {BASE_DIR}")
+    log.info(f"CRS par défaut: {DEFAULT_CRS}")
+    log.info(f"Redis: {'Actif' if redis_client else 'Cache fichier'}")
+    log.info(f"QGIS: {'Initialisé' if get_qgis_manager().is_initialized() else 'Échec'}")
+    log.info(f"Sessions: Timeout {SESSION_TIMEOUT.seconds // 60}min")
+    log.info(f"JWT: Access {JWT_ACCESS_TOKEN_EXPIRE_MINUTES}min / Refresh {JWT_REFRESH_TOKEN_EXPIRE_DAYS}j")
+    log.info("=" * 70)
+    
     if os.getenv('ENVIRONMENT') == 'development':
-        app.run(host='0.0.0.0', port=port, debug=debug)
+        app.run(host='0.0.0.0', port=port, debug=debug, threaded=True)
     else:
         log.info("Mode production : utiliser gunicorn")
-        log.info("Commande: gunicorn --workers 1 --threads 1 --bind 0.0.0.0:$PORT api:app")
+        log.info("Commande: gunicorn --workers 2 --threads 4 --bind 0.0.0.0:$PORT api:app")
