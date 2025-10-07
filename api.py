@@ -876,55 +876,55 @@ class ParcelService:
         self._ensure_aggregate()
     
     def _ensure_aggregate(self):
-    if not self.all_parcels_file.exists():
-        # Créer un GeoDataFrame temporaire avec une ligne vide/factice pour contourner la limitation
-        # de certaines versions de geopandas qui refusent d'écrire un GeoDataFrame complètement vide.
-        try:
-            # Essayez d'abord la méthode originale (pour les versions récentes de geopandas)
-            empty_gdf = gpd.GeoDataFrame(
-                columns=["id", "name", "commune", "section", "numero", "superficie_m2", "geometry"],
-                crs=self.default_crs
-            )
-            empty_gdf.to_file(self.all_parcels_file, driver="GeoJSON")
-        except ValueError as e:
-            if "Cannot write empty DataFrame to file" in str(e):
-                log.warning(f"GeoPandas ne permet pas d'écrire un GeoDataFrame vide. Utilisation d'un contournement.")
-                # Contournement : créer avec une ligne factice, puis la supprimer
-                temp_row = gpd.GeoDataFrame([{
-                    'id': 'temp_id',
-                    'name': '',
-                    'commune': '',
-                    'section': '',
-                    'numero': '',
-                    'superficie_m2': 0.0,
-                    'geometry': None # ou gpd.points_from_xy([0], [0])[0] pour un point nul
-                }], crs=self.default_crs)
-                temp_row.to_file(self.all_parcels_file, driver="GeoJSON")
-                # Relire et réécrire sans la ligne temporaire
-                gdf = gpd.read_file(self.all_parcels_file)
-                gdf = gdf[gdf['id'] != 'temp_id'] # Supprimer la ligne factice
-                gdf.to_file(self.all_parcels_file, driver="GeoJSON")
-                log.info(f"Fichier agrégat vide créé via contournement: {self.all_parcels_file}")
-            else:
-                # Si ce n'est pas l'erreur spécifique, la lever
-                raise e
-        except Exception as e:
-            # Si une autre erreur survient lors de la création initiale
-            log.error(f"Erreur lors de la création initiale du fichier agrégat: {e}")
-            raise # Relancer l'erreur pour que l'initialisation échoue proprement
-    else:
-        # Si le fichier existe, assurez-vous qu'il a la structure correcte
-        # (optionnel, mais bon pour la robustesse)
-        try:
-            existing_gdf = gpd.read_file(self.all_parcels_file)
-            required_cols = {"id", "name", "commune", "section", "numero", "superficie_m2", "geometry"}
-            if not required_cols.issubset(set(existing_gdf.columns)):
-                log.warning(f"Le fichier agrégat {self.all_parcels_file} a une structure inattendue.")
-                # Vous pouvez choisir de le recréer ou de l'ajuster ici si nécessaire
-        except Exception as e:
-            log.error(f"Erreur lors de la lecture du fichier agrégat existant: {e}")
-            # Gérer selon la gravité - peut-être recréer vide ou lever une erreur
-                       
+        if not self.all_parcels_file.exists():
+            # Créer un GeoDataFrame temporaire avec une ligne vide/factice pour contourner la limitation
+            # de certaines versions de geopandas qui refusent d'écrire un GeoDataFrame complètement vide.
+            try:
+                # Essayez d'abord la méthode originale (pour les versions récentes de geopandas)
+                empty_gdf = gpd.GeoDataFrame(
+                    columns=["id", "name", "commune", "section", "numero", "superficie_m2", "geometry"],
+                    crs=self.default_crs
+                )
+                empty_gdf.to_file(self.all_parcels_file, driver="GeoJSON")
+            except ValueError as e:
+                if "Cannot write empty DataFrame to file" in str(e):
+                    log.warning(f"GeoPandas ne permet pas d'écrire un GeoDataFrame vide. Utilisation d'un contournement.")
+                    # Contournement : créer avec une ligne factice, puis la supprimer
+                    temp_row = gpd.GeoDataFrame([{
+                        'id': 'temp_id',
+                        'name': '',
+                        'commune': '',
+                        'section': '',
+                        'numero': '',
+                        'superficie_m2': 0.0,
+                        'geometry': None # ou gpd.points_from_xy([0], [0])[0] pour un point nul
+                    }], crs=self.default_crs)
+                    temp_row.to_file(self.all_parcels_file, driver="GeoJSON")
+                    # Relire et réécrire sans la ligne temporaire
+                    gdf = gpd.read_file(self.all_parcels_file)
+                    gdf = gdf[gdf['id'] != 'temp_id'] # Supprimer la ligne factice
+                    gdf.to_file(self.all_parcels_file, driver="GeoJSON")
+                    log.info(f"Fichier agrégat vide créé via contournement: {self.all_parcels_file}")
+                else:
+                    # Si ce n'est pas l'erreur spécifique, la lever
+                    raise e
+            except Exception as e:
+                # Si une autre erreur survient lors de la création initiale
+                log.error(f"Erreur lors de la création initiale du fichier agrégat: {e}")
+                raise # Relancer l'erreur pour que l'initialisation échoue proprement
+        else:
+            # Si le fichier existe, assurez-vous qu'il a la structure correcte
+            # (optionnel, mais bon pour la robustesse)
+            try:
+                existing_gdf = gpd.read_file(self.all_parcels_file)
+                required_cols = {"id", "name", "commune", "section", "numero", "superficie_m2", "geometry"}
+                if not required_cols.issubset(set(existing_gdf.columns)):
+                    log.warning(f"Le fichier agrégat {self.all_parcels_file} a une structure inattendue.")
+                    # Vous pouvez choisir de le recréer ou de l'ajuster ici si nécessaire
+            except Exception as e:
+                log.error(f"Erreur lors de la lecture du fichier agrégat existant: {e}")
+                # Gérer selon la gravité - peut-être recréer vide ou lever une erreur
+                        
     def create_parcel(self, parcel_data: ParcelCreateModel) -> Dict[str, Any]:
         parcel_id = str(uuid.uuid4())
         try:
