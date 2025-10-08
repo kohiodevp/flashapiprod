@@ -1,5 +1,5 @@
 # ================================================================
-# Dockerfile - Image optimisée QGIS + Flask (Version pour Render - Basée sur apt)
+# Dockerfile - Image optimisée QGIS + Flask
 # ================================================================
 FROM ubuntu:22.04
 
@@ -24,10 +24,8 @@ RUN apt-get update && apt-get install -y \
     python3-venv \
     git \
     build-essential \
-    # Bibliothèques C/C++ géospatiales
     gdal-bin \
     libgdal-dev \
-    # Dépendances Qt pour QGIS
     libqt5core5a \
     libqt5gui5 \
     libqt5network5 \
@@ -35,7 +33,6 @@ RUN apt-get update && apt-get install -y \
     libqt5svg5 \
     libqt5widgets5 \
     libqt5xml5 \
-    # Autres dépendances
     fonts-dejavu-core \
     libgl1 \
     libglu1-mesa \
@@ -57,7 +54,6 @@ RUN apt-get update && apt-get install -y \
 
 # --- Vérification des installations ---
 RUN echo "=== Vérification des installations ===" && \
-    qgis --version 2>/dev/null || echo "QGIS CLI non disponible (normal en mode serveur)" && \
     python3 --version && \
     pip3 --version
 
@@ -67,52 +63,15 @@ RUN mkdir -p /opt/render/project/src/data/{shapefiles,csv,geojson,projects,other
 # --- Installation des dépendances Python ---
 COPY requirements.txt /tmp/requirements.txt
 
-# Installer les dépendances Python principales
-RUN pip3 install --no-cache-dir \
-    Flask==2.3.3 \
-    Flask-CORS==4.0.0 \
-    Flask-Compress==1.14 \
-    gunicorn==21.2.0 \
-    PyJWT==2.8.0 \
-    passlib==1.7.4 \
-    pydantic==1.10.12 \
-    redis==4.6.0
-
-# Installer les dépendances géospatiales (versions compatibles avec QGIS système)
-RUN pip3 install --no-cache-dir \
-    numpy==1.24.3 \
-    pandas==2.0.3 \
-    geopandas==0.13.2 \
-    shapely==2.0.1 \
-    pyproj==3.6.0 \
-    fiona==1.9.4
+# Installer les dépendances Python
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # --- Copie de l'application ---
 WORKDIR /opt/render/project/src
-COPY api.py .
-COPY wsgi.py .
-COPY default.qgs data/projects/default.qgs
+COPY . .
 
-# --- Vérification simple de l'environnement QGIS ---
-RUN python3 -c "\
-print('=== Test environnement QGIS ==='); \
-try: \
-    from qgis.core import QgsApplication, QgsProject; \
-    print('✅ QGIS core importé avec succès'); \
-    import os; \
-    os.environ['QT_QPA_PLATFORM'] = 'offscreen'; \
-    app = QgsApplication([], False); \
-    app.initQgis(); \
-    print('✅ QgsApplication initialisée'); \
-    project = QgsProject.instance(); \
-    print('✅ QgsProject fonctionnel'); \
-    app.exitQgis(); \
-    print('✅ Environnement QGIS validé'); \
-except Exception as e: \
-    print(f'❌ Erreur QGIS: {e}'); \
-    import traceback; \
-    traceback.print_exc(); \
-    sys.exit(1)"
+# --- Test QGIS simple ---
+RUN python3 -c "from qgis.core import QgsApplication; print('✅ QGIS importable')"
 
 # --- Configuration des permissions ---
 RUN chmod -R 755 /opt/render/project/src && \
@@ -121,7 +80,7 @@ RUN chmod -R 755 /opt/render/project/src && \
 # --- Exposition du port ---
 EXPOSE 10000
 
-# --- Healthcheck amélioré ---
+# --- Healthcheck ---
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -f http://localhost:10000/api/health || exit 1
 
