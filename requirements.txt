@@ -11,3 +11,4 @@ passlib==1.7.4
 PyJWT==2.8.0
 redis==4.6.0
 gunicorn==21.2.0
+fiona==1.9.4
