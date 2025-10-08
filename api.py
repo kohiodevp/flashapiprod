@@ -1373,6 +1373,60 @@ def delete_project_route(project_id, current_user):
 # ================================================================
 # Routes Parcelles
 # ================================================================
+@app.route('/api/debug/parcels', methods=['GET'])
+@handle_errors
+def debug_parcels():
+    """Endpoint de diagnostic des parcelles"""
+    parcels_dir = BASE_DIR / "parcels"
+    
+    # Compter les fichiers
+    all_files = list(parcels_dir.glob("*.geojson"))
+    individual_files = list(parcels_dir.glob("[!all_]*.geojson"))
+    
+    # Analyser quelques fichiers
+    sample_analysis = []
+    for file_path in individual_files[:3]:  # Premier 3 fichiers
+        try:
+            file_info = {
+                "name": file_path.name,
+                "size": file_path.stat().st_size,
+                "valid": False
+            }
+            if file_path.stat().st_size > 50:
+                gdf = gpd.read_file(file_path)
+                file_info["valid"] = not gdf.empty
+                if not gdf.empty:
+                    file_info["columns"] = list(gdf.columns)
+                    file_info["crs"] = str(gdf.crs)
+            sample_analysis.append(file_info)
+        except Exception as e:
+            file_info["error"] = str(e)
+            sample_analysis.append(file_info)
+    
+    # Vérifier l'agrégat
+    agg_file = parcels_dir / "all_parcels.geojson"
+    agg_info = {
+        "exists": agg_file.exists(),
+        "size": agg_file.stat().st_size if agg_file.exists() else 0
+    }
+    if agg_file.exists() and agg_file.stat().st_size > 100:
+        try:
+            gdf = gpd.read_file(agg_file)
+            agg_info["parcel_count"] = len(gdf)
+            agg_info["columns"] = list(gdf.columns) if not gdf.empty else []
+        except Exception as e:
+            agg_info["error"] = str(e)
+    
+    return jsonify({
+        "files": {
+            "total": len(all_files),
+            "individual": len(individual_files),
+            "aggregate": 1 if agg_file.exists() else 0
+        },
+        "aggregate_file": agg_info,
+        "sample_files": sample_analysis
+    })
+
 @app.route('/api/parcels', methods=['GET'])
 @optional_auth
 @handle_errors
