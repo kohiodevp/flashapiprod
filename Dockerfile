@@ -93,9 +93,26 @@ COPY api.py .
 COPY wsgi.py .
 COPY default.qgs data/projects/default.qgs
 
-# --- Vérification de l'environnement QGIS (script séparé) ---
-COPY test_qgis.py /tmp/test_qgis.py
-RUN python3 /tmp/test_qgis.py && rm /tmp/test_qgis.py
+# --- Vérification simple de l'environnement QGIS ---
+RUN python3 -c "\
+print('=== Test environnement QGIS ==='); \
+try: \
+    from qgis.core import QgsApplication, QgsProject; \
+    print('✅ QGIS core importé avec succès'); \
+    import os; \
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'; \
+    app = QgsApplication([], False); \
+    app.initQgis(); \
+    print('✅ QgsApplication initialisée'); \
+    project = QgsProject.instance(); \
+    print('✅ QgsProject fonctionnel'); \
+    app.exitQgis(); \
+    print('✅ Environnement QGIS validé'); \
+except Exception as e: \
+    print(f'❌ Erreur QGIS: {e}'); \
+    import traceback; \
+    traceback.print_exc(); \
+    sys.exit(1)"
 
 # --- Configuration des permissions ---
 RUN chmod -R 755 /opt/render/project/src && \
