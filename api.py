@@ -1380,32 +1380,115 @@ def list_parcels(current_user):
     limit = request.args.get('limit', default=100, type=int)
     offset = request.args.get('offset', default=0, type=int)
     
-    all_parcel_files = list((BASE_DIR / "parcels").glob("[!all_]*.geojson"))
-    start_idx = offset
-    end_idx = start_idx + limit
-    selected_files = all_parcel_files[start_idx:end_idx]
-    
-    parcels_data = []
-    for file_path in selected_files:
-        parcel_id = file_path.stem
-        try:
-            gdf = gpd.read_file(file_path)
+    try:
+        # Méthode 1: Essayer d'abord avec le fichier agrégé (plus fiable)
+        all_parcels_file = BASE_DIR / "parcels" / "all_parcels.geojson"
+        if all_parcels_file.exists() and all_parcels_file.stat().st_size > 100:
+            log.info("Utilisation du fichier agrégé pour le listing")
+            gdf = gpd.read_file(all_parcels_file)
+            
             if not gdf.empty:
-                parcel_data = gdf.iloc[0].to_dict()
-                parcel_data['geometry'] = mapping(gdf.geometry.iloc[0])
-                parcel_data['id'] = parcel_id
-                parcels_data.append(parcel_data)
-        except Exception as e:
-            log.error(f"Erreur lecture parcelle {file_path.stem}: {e}")
-    
-    return jsonify({
-        "data": parcels_data,
-        "pagination": {
-            "limit": limit,
-            "offset": offset,
-            "total": len(all_parcel_files)
-        }
-    })
+                # Appliquer la pagination
+                start_idx = offset
+                end_idx = start_idx + limit
+                paginated_gdf = gdf.iloc[start_idx:end_idx]
+                
+                # Convertir en format de réponse
+                features = []
+                for idx, row in paginated_gdf.iterrows():
+                    feature = {
+                        'id': row.get('id', f"unknown_{idx}"),
+                        'name': row.get('name', ''),
+                        'commune': row.get('commune', ''),
+                        'section': row.get('section', ''),
+                        'numero': row.get('numero', ''),
+                        'superficie_m2': row.get('superficie_m2'),
+                        'superficie_ha': row.get('superficie_ha'),
+                        'proprietaire': row.get('proprietaire', ''),
+                        'usage': row.get('usage', ''),
+                        'geometry': mapping(row.geometry) if hasattr(row, 'geometry') else None
+                    }
+                    features.append(feature)
+                
+                return jsonify({
+                    "data": features,
+                    "pagination": {
+                        "limit": limit,
+                        "offset": offset,
+                        "total": len(gdf)
+                    }
+                })
+        
+        # Méthode 2: Fallback - lire les fichiers individuels
+        log.info("Fallback sur les fichiers individuels")
+        parcels_dir = BASE_DIR / "parcels"
+        all_parcel_files = list(parcels_dir.glob("[!all_]*.geojson"))
+        
+        # Trier par date de modification (plus récent en premier)
+        all_parcel_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        
+        start_idx = offset
+        end_idx = start_idx + limit
+        selected_files = all_parcel_files[start_idx:end_idx]
+        
+        parcels_data = []
+        valid_files = 0
+        
+        for file_path in selected_files:
+            parcel_id = file_path.stem
+            try:
+                # Vérifier que le fichier n'est pas vide
+                if file_path.stat().st_size < 50:
+                    log.warning(f"Fichier vide ignoré: {file_path.name}")
+                    continue
+                
+                gdf = gpd.read_file(file_path)
+                if not gdf.empty:
+                    # Extraire la première ligne (normalement une seule par fichier)
+                    row = gdf.iloc[0]
+                    parcel_data = {
+                        'id': parcel_id,
+                        'name': row.get('name', ''),
+                        'commune': row.get('commune', ''),
+                        'section': row.get('section', ''),
+                        'numero': row.get('numero', ''),
+                        'superficie_m2': row.get('superficie_m2'),
+                        'superficie_ha': row.get('superficie_ha'),
+                        'proprietaire': row.get('proprietaire', ''),
+                        'usage': row.get('usage', ''),
+                        'geometry': mapping(row.geometry) if hasattr(row, 'geometry') else None
+                    }
+                    parcels_data.append(parcel_data)
+                    valid_files += 1
+                else:
+                    log.warning(f"GeoDataFrame vide: {file_path.name}")
+                    
+            except Exception as e:
+                log.error(f"Erreur lecture parcelle {file_path.stem}: {e}")
+                continue
+        
+        log.info(f"Fichiers traités: {valid_files}/{len(selected_files)} valides")
+        
+        return jsonify({
+            "data": parcels_data,
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "total": len(all_parcel_files)
+            },
+            "debug": {
+                "fichiers_totaux": len(all_parcel_files),
+                "fichiers_traites": len(selected_files),
+                "fichiers_valides": valid_files
+            }
+        })
+        
+    except Exception as e:
+        log.error(f"Erreur critique listing parcelles: {e}")
+        return jsonify({
+            "error": "Erreur lors du listing des parcelles",
+            "details": str(e)
+        }), 500
 
 @app.route('/api/parcels', methods=['POST'])
 @require_auth
