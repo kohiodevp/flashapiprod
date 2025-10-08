@@ -8,105 +8,138 @@ ENV DEBIAN_FRONTEND=noninteractive \
     QT_QPA_PLATFORM=offscreen \
     QGIS_DISABLE_MESSAGE_HOOKS=1 \
     QGIS_NO_OVERRIDE_IMPORT=1 \
-    PORT=10000
+    PORT=10000 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
 # --- Dépendances système de base ---
 RUN apt-get update && apt-get install -y \
     software-properties-common \
     gnupg \
     wget \
+    curl \
     python3 \
     python3-pip \
     python3-dev \
+    python3-venv \
     git \
     build-essential \
-    # Installer les bibliothèques C/C++ géospatiales système nécessaires pour QGIS
+    # Bibliothèques C/C++ géospatiales
     gdal-bin \
     libgdal-dev \
-    # Installer les bibliothèques Python de base (souvent dépendances de qgis/python3-qgis)
-    python3-numpy \
-    python3-pandas \
-    # Installer les dépendances Qt nécessaires pour QGIS
-    libqt5gui5 \
+    # Dépendances Qt pour QGIS
     libqt5core5a \
+    libqt5gui5 \
+    libqt5network5 \
     libqt5printsupport5 \
     libqt5svg5 \
+    libqt5widgets5 \
+    libqt5xml5 \
+    # Autres dépendances
     fonts-dejavu-core \
+    libgl1 \
+    libglu1-mesa \
+    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Dépôt QGIS ---
-RUN wget -O - https://qgis.org/downloads/qgis-archive-keyring.gpg   | gpg --dearmor | tee /etc/apt/keyrings/qgis-archive-keyring.gpg > /dev/null
-RUN echo "deb [signed-by=/etc/apt/keyrings/qgis-archive-keyring.gpg] https://qgis.org/ubuntu   jammy main" > /etc/apt/sources.list.d/qgis.list
+RUN wget -O - https://qgis.org/downloads/qgis-archive-keyring.gpg | gpg --dearmor | tee /etc/apt/keyrings/qgis-archive-keyring.gpg > /dev/null
+RUN echo "deb [signed-by=/etc/apt/keyrings/qgis-archive-keyring.gpg] https://qgis.org/ubuntu jammy main" > /etc/apt/sources.list.d/qgis.list
 
-# --- Installer QGIS (et ses dépendances Python associées via apt) ---
-RUN apt-get update || (sleep 10 && apt-get update) \
-    && apt-get install -y \
+# --- Installer QGIS ---
+RUN apt-get update && apt-get install -y \
     qgis \
     qgis-server \
-    qgis-plugin-grass \
     python3-qgis \
-    qgis-providers \
-    # Installer explicitement les paquets Python géospatiaux correspondants via apt
-    python3-gdal \
-    python3-fiona \
-    python3-pyproj \
-    python3-shapely \
-    python3-geopandas \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    qgis-providers-common \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# --- Vérifier les versions système installées (utile pour le debug) ---
-RUN echo "--- Versions des bibliothèques géospatiales système (après installation QGIS/apt) ---" && \
-    python3 -c "import gdal; print('GDAL Python (system):', gdal.__version__)" 2>/dev/null || echo "GDAL Python (system) not found" && \
-    python3 -c "import fiona; print('Fiona Python (system):', fiona.__version__)" 2>/dev/null || echo "Fiona Python (system) not found" && \
-    python3 -c "import pyproj; print('PyProj Python (system):', pyproj.__version__)" 2>/dev/null || echo "PyProj Python (system) not found" && \
-    python3 -c "import shapely; print('Shapely Python (system):', shapely.__version__)" 2>/dev/null || echo "Shapely Python (system) not found" && \
-    python3 -c "import geopandas; print('GeoPandas Python (system):', geopandas.__version__)" 2>/dev/null || echo "GeoPandas Python (system) not found" && \
-    ogrinfo --version 2>/dev/null || echo "GDAL CLI not found"
+# --- Vérification des installations ---
+RUN echo "=== Vérification des installations ===" && \
+    qgis --version 2>/dev/null || echo "QGIS CLI non disponible (normal en mode serveur)" && \
+    python3 --version && \
+    pip3 --version
 
-# --- Installation des autres dépendances Python via pip ---
-# Copier requirements.txt
-COPY requirements.txt /tmp/requirements.txt
-
-# --- Filtrer requirements.txt pour enlever les bibliothèques géospatiales et les dépendances de base installées via apt ---
-# Ces paquets sont gérés par apt et devraient être compatibles avec QGIS
-# On installe donc le reste via pip.
-# ATTENTION : Si la version installée par apt est trop ancienne, cette méthode échouera.
-# Mais elle évite les conflits de version pip/apt.
-RUN grep -v -E '^(GDAL|fiona|pyproj|shapely|geopandas|numpy|pandas)==.*$' /tmp/requirements.txt > /tmp/requirements_filtered.txt
-
-# Installer les paquets pip restants (SANS --no-deps cette fois)
-# Cela installera Flask et ses dépendances (click, itsdangerous, jinja2, werkzeug)
-# mais N'installera PAS les bibliothèques géospatiales de base (GDAL, fiona, etc.) car elles sont filtrées.
-RUN pip3 install --no-cache-dir -r /tmp/requirements_filtered.txt
-
-# Création structure dossiers
+# --- Création de la structure de dossiers ---
 RUN mkdir -p /opt/render/project/src/data/{shapefiles,csv,geojson,projects,other,tiles,parcels,documents,cache}
 
-# Copie application
+# --- Installation des dépendances Python ---
+COPY requirements.txt /tmp/requirements.txt
+
+# Installer les dépendances Python principales
+RUN pip3 install --no-cache-dir \
+    Flask==2.3.3 \
+    Flask-CORS==4.0.0 \
+    Flask-Compress==1.14 \
+    gunicorn==21.2.0 \
+    PyJWT==2.8.0 \
+    passlib==1.7.4 \
+    pydantic==1.10.12 \
+    redis==4.6.0
+
+# Installer les dépendances géospatiales (versions compatibles avec QGIS système)
+RUN pip3 install --no-cache-dir \
+    numpy==1.24.3 \
+    pandas==2.0.3 \
+    geopandas==0.13.2 \
+    shapely==2.0.1 \
+    pyproj==3.6.0 \
+    fiona==1.9.4
+
+# --- Copie de l'application ---
 WORKDIR /opt/render/project/src
 COPY api.py .
+COPY wsgi.py .
 COPY default.qgs data/projects/default.qgs
 
-# Permissions
+# --- Configuration des permissions ---
 RUN chmod -R 755 /opt/render/project/src && \
     chmod -R 777 /opt/render/project/src/data
 
-# Exposition port
+# --- Vérification de l'environnement QGIS ---
+RUN python3 -c "
+import sys
+print('=== Test environnement QGIS ===')
+try:
+    from qgis.core import QgsApplication, QgsProject
+    print('✅ QGIS core importé avec succès')
+    
+    # Test d'initialisation basique
+    import os
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    
+    # Créer une application QGIS sans interface
+    app = QgsApplication([], False)
+    app.initQgis()
+    print('✅ QgsApplication initialisée')
+    
+    # Test de projet
+    project = QgsProject.instance()
+    print('✅ QgsProject fonctionnel')
+    
+    app.exitQgis()
+    print('✅ Environnement QGIS validé')
+    
+except Exception as e:
+    print(f'❌ Erreur QGIS: {e}')
+    sys.exit(1)
+"
+
+# --- Exposition du port ---
 EXPOSE 10000
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+# --- Healthcheck amélioré ---
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD curl -f http://localhost:10000/api/health || exit 1
 
-# Démarrage avec Gunicorn
-# IMPORTANT : Gunicorn doit attendre que QGIS soit initialisé.
-# L'initialisation se fait dans api.py au démarrage du script.
-# Si QGIS échoue, api.py lèvera une exception et le worker Gunicorn mourra.
+# --- Démarrage avec Gunicorn ---
 CMD ["gunicorn", "--bind", "0.0.0.0:10000", \
-     "--workers", "1", \
-     "--threads", "2", \
+     "--workers", "2", \
+     "--threads", "4", \
      "--worker-class", "gthread", \
      "--timeout", "120", \
+     "--preload", \
      "--access-logfile", "-", \
      "--error-logfile", "-", \
-     "api:app"]
+     "wsgi:app"]
