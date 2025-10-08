@@ -98,32 +98,34 @@ RUN chmod -R 755 /opt/render/project/src && \
     chmod -R 777 /opt/render/project/src/data
 
 # --- Vérification de l'environnement QGIS ---
-RUN python3 -c "
-import sys
-print('=== Test environnement QGIS ===')
-try:
-    from qgis.core import QgsApplication, QgsProject
-    print('✅ QGIS core importé avec succès')
-    
-    # Test d'initialisation basique
-    import os
-    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-    
-    # Créer une application QGIS sans interface
-    app = QgsApplication([], False)
-    app.initQgis()
-    print('✅ QgsApplication initialisée')
-    
-    # Test de projet
-    project = QgsProject.instance()
-    print('✅ QgsProject fonctionnel')
-    
-    app.exitQgis()
-    print('✅ Environnement QGIS validé')
-    
-except Exception as e:
-    print(f'❌ Erreur QGIS: {e}')
-    sys.exit(1)
+RUN python3 -c "\
+import sys\n\
+print('=== Test environnement QGIS ===')\n\
+try:\n\
+    from qgis.core import QgsApplication, QgsProject\n\
+    print('✅ QGIS core importé avec succès')\n\
+    \n\
+    # Test d'initialisation basique\n\
+    import os\n\
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'\n\
+    \n\
+    # Créer une application QGIS sans interface\n\
+    app = QgsApplication([], False)\n\
+    app.initQgis()\n\
+    print('✅ QgsApplication initialisée')\n\
+    \n\
+    # Test de projet\n\
+    project = QgsProject.instance()\n\
+    print('✅ QgsProject fonctionnel')\n\
+    \n\
+    app.exitQgis()\n\
+    print('✅ Environnement QGIS validé')\n\
+    \n\
+except Exception as e:\n\
+    print(f'❌ Erreur QGIS: {e}')\n\
+    import traceback\n\
+    traceback.print_exc()\n\
+    sys.exit(1)\
 "
 
 # --- Exposition du port ---
