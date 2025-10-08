@@ -1648,7 +1648,12 @@ def ogc_service(service):
         project_file = str(DEFAULT_PROJECT)
     
     if not os.path.exists(project_file):
-        return jsonify({"error": "Projet introuvable"}), 404
+        return jsonify({
+            "error": "Projet QGIS introuvable",
+            "message": f"Le projet {project_file} n'existe pas",
+            "available_projects": [f.name for f in PROJECTS_DIR.glob("*.qgs")],
+            "solution": "Utilisez /api/projects pour creer un projet ou uploader un fichier .qgs"
+        }), 404
     
     if 'GETMAP' in qs.upper() and 'CRS=' not in qs.upper() and 'SRS=' not in qs.upper():
         qs += f"&CRS={DEFAULT_CRS}"
@@ -1688,6 +1693,51 @@ def ogc_service(service):
     except Exception as e:
         log.error(f"Erreur OGC: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/projects/init-default', methods=['POST'])
+@handle_errors
+def init_default_project():
+    """Initialise le projet QGIS par défaut"""
+    try:
+        project_content = """<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.28.0-Firenze">
+  <title>Projet Parcelles Par Defaut</title>
+  <projectCrs authid="EPSG:4326"/>
+  <mapcanvas>
+    <units>meters</units>
+    <extent>
+      <xmin>-180</xmin>
+      <ymin>-90</ymin>
+      <xmax>180</xmax>
+      <ymax>90</ymax>
+    </extent>
+    <destinationsrs>
+      <spatialrefsys>
+        <proj4>+proj=longlat +datum=WGS84 +no_defs</proj4>
+        <srsid>3452</srsid>
+        <srid>4326</srid>
+        <authid>EPSG:4326</authid>
+        <description>WGS 84</description>
+        <projectionacronym>longlat</projectionacronym>
+        <ellipsoidacronym>WGS84</ellipsoidacronym>
+      </spatialrefsys>
+    </destinationsrs>
+  </mapcanvas>
+</qgis>"""
+        
+        with open(DEFAULT_PROJECT, 'w') as f:
+            f.write(project_content)
+        
+        log.info("Projet par defaut cree")
+        return jsonify({
+            "message": "Projet QGIS par defaut cree",
+            "path": str(DEFAULT_PROJECT),
+            "crs": "EPSG:4326"
+        })
+        
+    except Exception as e:
+        log.error(f"Erreur creation projet: {e}")
+        return jsonify({"error": f"Erreur creation projet: {str(e)}"}), 500
 
 # ================================================================
 # Routes Rapports PDF
